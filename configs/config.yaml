@@ -1,0 +1,31 @@
+data_generation:
+  total_records: 10000000
+  time_span_hours: 24
+  device_count: 1000
+  factory_count: 10
+  sampling_rate_ms: 10000
+  batch_size: 1000
+  output_file: "generated_data.json"
+
+databases:
+  influxdb:
+    url: "http://localhost:8086"
+    token: "my-super-secret-auth-token"
+    org: "testorg"
+    bucket: "testbucket"
+
+  tdengine:
+    dsn: "root:taosdata@tcp(localhost:6030)/"
+    database: "benchmark_db"
+
+  iotdb:
+    host: "localhost"
+    port: 6667
+    username: "root"
+    password: "root"
+
+benchmark:
+  concurrency_levels: [1, 5, 20, 50, 100]
+  query_duration_seconds: 60
+  warmup_duration_seconds: 10
+  report_interval: 5

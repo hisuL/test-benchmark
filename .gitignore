@@ -1,0 +1,20 @@
+# Build and Release Folders
+/.idea/
+/.idea/*
+bin-debug/
+bin-release/
+
+# Other files and folders
+.settings/
+/eda_license/pkg/*
+/pkg/*
+/lsf_script/*
+# Executables
+*.swf
+*.air
+*.ipa
+*.apk
+*.tar
+# Project files, i.e. `.project`, `.actionScriptProperties` and `.flexProperties`
+# should NOT be excluded as they contain compiler settings and other important
+# information for Eclipse / Flash Builder.
