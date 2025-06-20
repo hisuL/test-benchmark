@@ -152,6 +152,14 @@ func (b *Benchmark) RunQueryBenchmark(ctx context.Context) ([]models.QueryResult
 	for _, db := range b.databases {
 		b.logger.Infof("Testing query performance for %s", db.Name())
 
+		b.logger.Info("check db connection before running query benchmark")
+
+		// Connect and prepare schema
+		if err := db.Connect(ctx); err != nil {
+			b.logger.Errorf("Failed to connect to %s: %v", db.Name(), err)
+			continue
+		}
+
 		for _, concurrency := range b.config.Benchmark.ConcurrencyLevels {
 			b.logger.Infof("Testing with %d concurrent connections", concurrency)
 
@@ -268,6 +276,10 @@ func (b *Benchmark) measureQueryPerformance(ctx context.Context, db database.Dat
 func (b *Benchmark) executeQuery(ctx context.Context, db database.Database, queryType string, countMetrics bool, totalQueries, totalErrors *int64, latencies *[]float32) error {
 	if countMetrics {
 		atomic.AddInt64(totalQueries, 1)
+	}
+
+	if err := db.Connect(ctx); err != nil {
+		b.logger.Errorf("Failed to connect to %s: %v", db.Name(), err)
 	}
 
 	// Get random time range for queries

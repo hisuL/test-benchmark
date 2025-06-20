@@ -33,6 +33,10 @@ func (db *InfluxDB) Name() string {
 }
 
 func (db *InfluxDB) Connect(ctx context.Context) error {
+	//如果 writeAPI 和 queryAPI 已经初始化，则不需要重新初始化
+	if db.writeAPI != nil && db.queryAPI != nil {
+		return nil
+	}
 	db.writeAPI = db.client.WriteAPI(db.org, db.bucket)
 	db.queryAPI = db.client.QueryAPI(db.org)
 

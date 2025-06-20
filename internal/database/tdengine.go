@@ -28,6 +28,17 @@ func (db *TDengine) Name() string {
 }
 
 func (db *TDengine) Connect(ctx context.Context) error {
+	if db.db != nil {
+		// If already connected, just ping to check health
+		if err := db.Ping(ctx); err == nil {
+			return nil
+		}
+		// If ping fails, close the existing connection
+		if err := db.Close(); err != nil {
+			return fmt.Errorf("failed to close existing connection: %w", err)
+		}
+	}
+
 	var err error
 	db.db, err = sql.Open("taosSql", db.dsn)
 	if err != nil {

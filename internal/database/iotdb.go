@@ -33,6 +33,15 @@ func (db *IoTDB) Name() string {
 }
 
 func (db *IoTDB) Connect(ctx context.Context) error {
+	// 检查session是否已初始化（假设Config字段可以用来判断）
+	// 这里需要根据client.Session的具体结构来判断
+	if db.session.GetSessionId() != 0 { // 假设有这样的方法
+		// 验证连接是否仍然有效
+		if err := db.Ping(ctx); err == nil {
+			return nil
+		}
+	}
+
 	config := &client.Config{
 		Host:     db.host,
 		Port:     strconv.Itoa(db.port),
@@ -203,8 +212,6 @@ func (db *IoTDB) QueryByDeviceAndTimeRange(ctx context.Context, deviceID string,
 }
 
 func (db *IoTDB) QueryAggregation(ctx context.Context, deviceID string, start, end time.Time, aggType string) (float32, error) {
-	devicePath := fmt.Sprintf("root.benchmark.*.%s.temperature", deviceID)
-
 	var aggFunc string
 	switch aggType {
 	case "avg":
@@ -217,11 +224,12 @@ func (db *IoTDB) QueryAggregation(ctx context.Context, deviceID string, start, e
 		aggFunc = "avg"
 	}
 
+	// IoTDB 1.3.0 正确语法
 	sql := fmt.Sprintf(`
-        SELECT %s(%s)
-        FROM root.benchmark
+        SELECT %s(temperature)
+        FROM root.benchmark.*.%s
         WHERE time >= %d AND time <= %d
-    `, aggFunc, devicePath, start.UnixMilli(), end.UnixMilli())
+    `, aggFunc, deviceID, start.UnixMilli(), end.UnixMilli())
 
 	sessionDataSet, err := db.session.ExecuteQueryStatement(sql, nil)
 	if err != nil {
@@ -248,11 +256,12 @@ func (db *IoTDB) QueryAggregation(ctx context.Context, deviceID string, start, e
 }
 
 func (db *IoTDB) QueryTimeRange(ctx context.Context, start, end time.Time, limit int) ([]models.SensorData, error) {
+	// IoTDB 1.3.0 正确语法
 	sql := fmt.Sprintf(`
-        SELECT *
-        FROM root.benchmark.**
+        SELECT ** 
+        FROM root.benchmark
         WHERE time >= %d AND time <= %d
-        ORDER BY time
+        ORDER BY time ASC
         LIMIT %d
     `, start.UnixMilli(), end.UnixMilli(), limit)
 
@@ -263,9 +272,8 @@ func (db *IoTDB) QueryTimeRange(ctx context.Context, start, end time.Time, limit
 	defer sessionDataSet.Close()
 
 	var data []models.SensorData
-	count := 0
 
-	for count < limit {
+	for {
 		hasNext, err := sessionDataSet.Next()
 		if err != nil {
 			return nil, fmt.Errorf("error reading next record: %w", err)
@@ -282,8 +290,17 @@ func (db *IoTDB) QueryTimeRange(ctx context.Context, start, end time.Time, limit
 			continue
 		}
 
+		// 从列名中解析设备和工厂信息
+		columnNames := sessionDataSet.GetColumnNames()
+		factoryID, deviceID := "", ""
+		if len(columnNames) > 0 {
+			factoryID, deviceID = parseDeviceInfo(columnNames[0])
+		}
+
 		sensorData := models.SensorData{
 			Timestamp:       time.UnixMilli(record.GetTimestamp()),
+			FactoryID:       factoryID,
+			DeviceID:        deviceID,
 			Temperature:     getFloatFromRecord(record, 0),
 			Humidity:        getFloatFromRecord(record, 1),
 			Pressure:        getFloatFromRecord(record, 2),
@@ -295,8 +312,8 @@ func (db *IoTDB) QueryTimeRange(ctx context.Context, start, end time.Time, limit
 			ErrorCode:       int32(getInt64FromRecord(record, 8)),
 			ProductionCount: getInt64FromRecord(record, 9),
 		}
+
 		data = append(data, sensorData)
-		count++
 	}
 
 	return data, nil
@@ -307,27 +324,35 @@ func (db *IoTDB) QueryGroupBy(ctx context.Context, start, end time.Time, groupBy
 
 	switch groupBy {
 	case "device":
+		// 按设备分组 - 使用GROUP BY LEVEL
 		sql = fmt.Sprintf(`
             SELECT avg(temperature)
             FROM root.benchmark.**
             WHERE time >= %d AND time <= %d
             GROUP BY LEVEL = 3
         `, start.UnixMilli(), end.UnixMilli())
+
 	case "factory":
+		// 按工厂分组 - 使用GROUP BY LEVEL
 		sql = fmt.Sprintf(`
             SELECT avg(temperature)
             FROM root.benchmark.**
             WHERE time >= %d AND time <= %d
             GROUP BY LEVEL = 2
         `, start.UnixMilli(), end.UnixMilli())
-	default:
-		intervalMs := interval.Milliseconds()
+
+	case "time":
+		// 按时间分组 - 使用GROUP BY TIME
+		intervalStr := formatInterval(interval)
 		sql = fmt.Sprintf(`
             SELECT avg(temperature)
             FROM root.benchmark.**
             WHERE time >= %d AND time <= %d
-            GROUP BY ([%d, %d), %dms)
-        `, start.UnixMilli(), end.UnixMilli(), start.UnixMilli(), end.UnixMilli(), intervalMs)
+            GROUP BY (%s, [%d, %d))
+        `, start.UnixMilli(), end.UnixMilli(), intervalStr, start.UnixMilli(), end.UnixMilli())
+
+	default:
+		return nil, fmt.Errorf("unsupported groupBy type: %s", groupBy)
 	}
 
 	sessionDataSet, err := db.session.ExecuteQueryStatement(sql, nil)
@@ -354,13 +379,70 @@ func (db *IoTDB) QueryGroupBy(ctx context.Context, start, end time.Time, groupBy
 			continue
 		}
 
-		key := fmt.Sprintf("%d", record.GetTimestamp())
+		var key string
+		switch groupBy {
+		case "device", "factory":
+			// 从列名中提取分组信息
+			columnNames := sessionDataSet.GetColumnNames()
+			if len(columnNames) > 0 {
+				key = extractGroupKey(columnNames[0], groupBy)
+			} else {
+				key = fmt.Sprintf("unknown_%d", len(result))
+			}
+		case "time":
+			// 使用时间戳作为key
+			key = time.UnixMilli(record.GetTimestamp()).Format("2006-01-02 15:04:05")
+		}
+
 		if len(record.GetFields()) > 0 {
 			result[key] = getFloatFromRecord(record, 0)
 		}
 	}
 
 	return result, nil
+}
+
+// 解析设备信息
+func parseDeviceInfo(columnName string) (factoryID, deviceID string) {
+	// 假设列名格式：root.benchmark.factory_001.device_050.temperature
+	parts := strings.Split(columnName, ".")
+	if len(parts) >= 5 {
+		factoryID = parts[2] // factory_001
+		deviceID = parts[3]  // device_050
+	}
+	return
+}
+
+// 提取分组键
+func extractGroupKey(columnName, groupBy string) string {
+	parts := strings.Split(columnName, ".")
+
+	switch groupBy {
+	case "factory":
+		if len(parts) >= 3 {
+			return parts[2] // factory_001
+		}
+	case "device":
+		if len(parts) >= 4 {
+			return fmt.Sprintf("%s.%s", parts[2], parts[3]) // factory_001.device_050
+		}
+	}
+
+	return columnName
+}
+
+// 格式化时间间隔
+func formatInterval(interval time.Duration) string {
+	if interval >= time.Hour {
+		hours := int(interval.Hours())
+		return fmt.Sprintf("%dh", hours)
+	} else if interval >= time.Minute {
+		minutes := int(interval.Minutes())
+		return fmt.Sprintf("%dm", minutes)
+	} else {
+		seconds := int(interval.Seconds())
+		return fmt.Sprintf("%ds", seconds)
+	}
 }
 
 func (db *IoTDB) Ping(ctx context.Context) error {
