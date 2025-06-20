@@ -309,3 +309,92 @@ func (db *TDengine) QueryGroupBy(ctx context.Context, start, end time.Time, grou
 func (db *TDengine) Ping(ctx context.Context) error {
 	return db.db.PingContext(ctx)
 }
+
+func (db *TDengine) GetRandomFactoryId(ctx context.Context) string {
+	query := fmt.Sprintf(`
+        USE %s;
+        SELECT DISTINCT factory_id FROM sensor_data LIMIT 1 OFFSET FLOOR(RAND() * (SELECT COUNT(DISTINCT factory_id) FROM sensor_data))
+    `, db.database)
+
+	var factoryID string
+	err := db.db.QueryRowContext(ctx, query).Scan(&factoryID)
+	if err != nil {
+		fmt.Errorf("failed to get random factory ID: %w", err)
+		return ""
+	}
+	return factoryID
+}
+
+func (db *TDengine) GetRandomDeviceId(ctx context.Context, factoryId string) string {
+	query := fmt.Sprintf(`
+        USE %s;
+        SELECT DISTINCT device_id FROM sensor_data WHERE factory_id = '%s' LIMIT 1 OFFSET FLOOR(RAND() * (SELECT COUNT(DISTINCT device_id) FROM sensor_data WHERE factory_id = '%s'))
+    `, db.database, factoryId, factoryId)
+
+	var deviceID string
+	err := db.db.QueryRowContext(ctx, query).Scan(&deviceID)
+	if err != nil {
+		fmt.Errorf("failed to get random device ID: %w", err)
+		return ""
+	}
+	return deviceID
+}
+
+func (db *TDengine) GetStartTime(ctx context.Context, factoryId string, deviceId string) time.Time {
+	query := fmt.Sprintf(`
+        USE %s;
+        SELECT MIN(ts) FROM sensor_data WHERE factory_id = '%s' AND device_id = '%s'
+    `, db.database, factoryId, deviceId)
+
+	var startTime string
+	err := db.db.QueryRowContext(ctx, query).Scan(&startTime)
+	if err != nil {
+		fmt.Errorf("failed to get start time: %w", err)
+		return time.Time{}
+	}
+
+	parsedTime, err := time.Parse("2006-01-02 15:04:05", startTime)
+	if err != nil {
+		fmt.Errorf("failed to parse start time: %w", err)
+		return time.Time{}
+	}
+	return parsedTime
+}
+
+func (db *TDengine) GetEndTime(ctx context.Context, factoryId string, deviceId string) time.Time {
+	query := fmt.Sprintf(`
+        USE %s;
+        SELECT MAX(ts) FROM sensor_data WHERE factory_id = '%s' AND device_id = '%s'
+    `, db.database, factoryId, deviceId)
+
+	var endTime string
+	err := db.db.QueryRowContext(ctx, query).Scan(&endTime)
+	if err != nil {
+		fmt.Errorf("failed to get end time: %w", err)
+		return time.Time{}
+	}
+
+	parsedTime, err := time.Parse("2006-01-02 15:04:05", endTime)
+	if err != nil {
+		fmt.Errorf("failed to parse end time: %w", err)
+		return time.Time{}
+	}
+	return parsedTime
+}
+
+func (db *TDengine) RemoveALLData(ctx context.Context) error {
+	query := fmt.Sprintf("DROP DATABASE IF EXISTS %s", db.database)
+	_, err := db.db.ExecContext(ctx, query)
+	if err != nil {
+		return fmt.Errorf("failed to remove all data: %w", err)
+	}
+
+	// Optionally recreate the database
+	createDbQuery := fmt.Sprintf("CREATE DATABASE %s", db.database)
+	_, err = db.db.ExecContext(ctx, createDbQuery)
+	if err != nil {
+		return fmt.Errorf("failed to recreate database: %w", err)
+	}
+
+	return nil
+}

@@ -282,15 +282,11 @@ func (b *Benchmark) executeQuery(ctx context.Context, db database.Database, quer
 		b.logger.Errorf("Failed to connect to %s: %v", db.Name(), err)
 	}
 
-	// Get random time range for queries
-	now := time.Now()
-	start := now.Add(-time.Duration(b.config.DataGeneration.TimeSpanHours) * time.Hour)
-	end := now.Add(-time.Duration(b.config.DataGeneration.TimeSpanHours/2) * time.Hour)
-
-	// Get random device ID
-	deviceID := fmt.Sprintf("device_%03d", 1+int(time.Now().UnixNano())%b.config.DataGeneration.DeviceCount/10)
-
 	var err error
+	factoryId := db.GetRandomFactoryId(ctx)
+	deviceID := db.GetRandomDeviceId(ctx, factoryId)
+	start := db.GetStartTime(ctx, factoryId, deviceID)
+	end := db.GetEndTime(ctx, factoryId, deviceID)
 
 	switch queryType {
 	case "point_query":

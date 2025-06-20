@@ -26,4 +26,19 @@ type Database interface {
 
 	// Health check
 	Ping(ctx context.Context) error
+
+	//GetRandomFactoryId 从数据库里获取一个存在的随机的  factoryId
+	GetRandomFactoryId(ctx context.Context) string
+
+	// GetRandomDeviceId 从数据库里获取一个存在的随机的 deviceId
+	GetRandomDeviceId(ctx context.Context, deviceId string) string
+
+	// GetStartTime 从数据库里获取指定 factoryId 和 deviceId 的数据的起始时间
+	GetStartTime(ctx context.Context, factoryId string, deviceId string) time.Time
+
+	// GetEndTime 从数据库里获取指定 factoryId 和 deviceId 的数据的结束时间
+	GetEndTime(ctx context.Context, factoryId string, deviceId string) time.Time
+
+	// RemoveALLData 清除数据库中的所有数据
+	RemoveALLData(ctx context.Context) error
 }

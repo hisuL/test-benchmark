@@ -282,3 +282,144 @@ func getIntValue(record *query.FluxRecord, key string) int64 {
 	}
 	return 0
 }
+
+// GetRandomFactoryId 从数据库里获取一个存在的随机的 factoryId
+func (db *InfluxDB) GetRandomFactoryId(ctx context.Context) string {
+	queryStr := fmt.Sprintf(`
+        from(bucket: "%s")
+        |> range(start: -30d)
+        |> filter(fn: (r) => r._measurement == "sensor_data")
+        |> keep(columns: ["factory_id"])
+        |> distinct(column: "factory_id")
+        |> limit(n: 1)
+    `, db.bucket)
+
+	result, err := db.queryAPI.Query(ctx, queryStr)
+	if err != nil {
+		return ""
+	}
+
+	if result.Next() {
+		return getStringValue(result.Record(), "factory_id")
+	}
+
+	return ""
+}
+
+// GetRandomDeviceId 从数据库里获取一个存在的随机的 deviceId
+func (db *InfluxDB) GetRandomDeviceId(ctx context.Context, factoryId string) string {
+	var factoryFilter string
+	if factoryId != "" {
+		factoryFilter = fmt.Sprintf(`|> filter(fn: (r) => r.factory_id == "%s")`, factoryId)
+	}
+
+	queryStr := fmt.Sprintf(`
+        from(bucket: "%s")
+        |> range(start: -30d)
+        |> filter(fn: (r) => r._measurement == "sensor_data")
+        %s
+        |> keep(columns: ["device_id"])
+        |> distinct(column: "device_id")
+        |> limit(n: 1)
+    `, db.bucket, factoryFilter)
+
+	result, err := db.queryAPI.Query(ctx, queryStr)
+	if err != nil {
+		return ""
+	}
+
+	if result.Next() {
+		return getStringValue(result.Record(), "device_id")
+	}
+
+	return ""
+}
+
+// GetStartTime 从数据库里获取指定 factoryId 和 deviceId 的数据的起始时间
+func (db *InfluxDB) GetStartTime(ctx context.Context, factoryId string, deviceId string) time.Time {
+	var filters []string
+	if factoryId != "" {
+		filters = append(filters, fmt.Sprintf(`|> filter(fn: (r) => r.factory_id == "%s")`, factoryId))
+	}
+	if deviceId != "" {
+		filters = append(filters, fmt.Sprintf(`|> filter(fn: (r) => r.device_id == "%s")`, deviceId))
+	}
+
+	filterStr := ""
+	for _, filter := range filters {
+		filterStr += filter + "\n        "
+	}
+
+	queryStr := fmt.Sprintf(`
+        from(bucket: "%s")
+        |> range(start: -365d)
+        |> filter(fn: (r) => r._measurement == "sensor_data")
+        %s
+        |> first()
+        |> keep(columns: ["_time"])
+    `, db.bucket, filterStr)
+
+	result, err := db.queryAPI.Query(ctx, queryStr)
+	if err != nil {
+		return time.Time{}
+	}
+
+	if result.Next() {
+		return result.Record().Time()
+	}
+
+	return time.Time{}
+}
+
+// GetEndTime 从数据库里获取指定 factoryId 和 deviceId 的数据的结束时间
+func (db *InfluxDB) GetEndTime(ctx context.Context, factoryId string, deviceId string) time.Time {
+	var filters []string
+	if factoryId != "" {
+		filters = append(filters, fmt.Sprintf(`|> filter(fn: (r) => r.factory_id == "%s")`, factoryId))
+	}
+	if deviceId != "" {
+		filters = append(filters, fmt.Sprintf(`|> filter(fn: (r) => r.device_id == "%s")`, deviceId))
+	}
+
+	filterStr := ""
+	for _, filter := range filters {
+		filterStr += filter + "\n        "
+	}
+
+	queryStr := fmt.Sprintf(`
+        from(bucket: "%s")
+        |> range(start: -365d)
+        |> filter(fn: (r) => r._measurement == "sensor_data")
+        %s
+        |> last()
+        |> keep(columns: ["_time"])
+    `, db.bucket, filterStr)
+
+	result, err := db.queryAPI.Query(ctx, queryStr)
+	if err != nil {
+		return time.Time{}
+	}
+
+	if result.Next() {
+		return result.Record().Time()
+	}
+
+	return time.Time{}
+}
+
+// RemoveALLData 清除数据库中的所有数据
+func (db *InfluxDB) RemoveALLData(ctx context.Context) error {
+	// 使用 InfluxDB 的 Delete API 来删除所有数据
+	deleteAPI := db.client.DeleteAPI()
+
+	// 删除指定时间范围内的所有数据（这里使用一个很大的时间范围）
+	start := time.Date(1970, 1, 1, 0, 0, 0, 0, time.UTC)
+	stop := time.Now().Add(24 * time.Hour) // 明天
+
+	err := deleteAPI.DeleteWithName(ctx, db.org, db.bucket, start, stop, "")
+	if err != nil {
+		return fmt.Errorf("failed to delete all data: %w", err)
+	}
+
+	return nil
+}

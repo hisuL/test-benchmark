@@ -1,6 +1,7 @@
 data_generation:
   total_records: 10000000
   time_span_hours: 24
+  day: "2025-06-20"
   device_count: 1000
   factory_count: 10
   sampling_rate_ms: 10000
