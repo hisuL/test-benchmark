@@ -3,6 +3,10 @@
 /.idea/*
 bin-debug/
 bin-release/
+/results/
+/results/*
+/bin/*
+/generated_data.json
 
 # Other files and folders
 .settings/
@@ -15,6 +19,7 @@ bin-release/
 *.ipa
 *.apk
 *.tar
+*.sum
 # Project files, i.e. `.project`, `.actionScriptProperties` and `.flexProperties`
 # should NOT be excluded as they contain compiler settings and other important
 # information for Eclipse / Flash Builder.
