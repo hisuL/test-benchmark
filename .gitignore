@@ -10,8 +10,6 @@ bin-release/
 
 # Other files and folders
 .settings/
-/eda_license/pkg/*
-/pkg/*
 /lsf_script/*
 # Executables
 *.swf
