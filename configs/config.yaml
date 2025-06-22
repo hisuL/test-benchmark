@@ -10,23 +10,24 @@ data_generation:
 
 databases:
   influxdb:
-    url: "http://localhost:8086"
-    token: "my-super-secret-auth-token"
+    url: "http://192.168.100.190:8086"
+    token: "ipX7uq6r85YMd4nG6dhIMPMCsKffBGAqf-4uUaFPjI_gdWrlPB61SNadBt9UFB7YtVi9z2m9lIOQQfllPqW2Fg=="
     org: "testorg"
     bucket: "testbucket"
 
   tdengine:
-    dsn: "root:taosdata@tcp(localhost:6030)/"
+    dsn: "root:taosdata@tcp(192.168.100.190:6030)/"
     database: "benchmark_db"
 
   iotdb:
-    host: "localhost"
+    host: "192.168.100.190"
     port: 6667
     username: "root"
     password: "root"
 
 benchmark:
-  concurrency_levels: [1, 5, 20, 50, 100]
+  ## concurrency_levels: [1, 5, 20, 50, 100]
+  concurrency_levels: [100]
   query_duration_seconds: 60
   warmup_duration_seconds: 10
-  report_interval: 5
+  report_interval:
