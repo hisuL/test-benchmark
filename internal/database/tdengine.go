@@ -175,6 +175,7 @@ func (db *TDengine) QueryByDeviceAndTimeRange(ctx context.Context, deviceID stri
 	}
 	defer rows.Close()
 
+	fmt.Printf(query)
 	var data []models.SensorData
 	for rows.Next() {
 		var record models.SensorData
@@ -214,6 +215,7 @@ func (db *TDengine) QueryAggregation(ctx context.Context, deviceID string, start
         WHERE device_id = '%s' AND ts >= '%s' AND ts <= '%s'
     `, db.database, aggFunc, deviceID, start.Format("2006-01-02 15:04:05"), end.Format("2006-01-02 15:04:05"))
 
+	fmt.Printf(query)
 	var result float32
 	err := db.db.QueryRowContext(ctx, query).Scan(&result)
 	return result, err
@@ -229,6 +231,7 @@ func (db *TDengine) QueryTimeRange(ctx context.Context, start, end time.Time, li
         LIMIT %d
     `, db.database, start.Format("2006-01-02 15:04:05"), end.Format("2006-01-02 15:04:05"), limit)
 
+	fmt.Printf(query)
 	rows, err := db.db.QueryContext(ctx, query)
 	if err != nil {
 		return nil, err
@@ -284,6 +287,7 @@ func (db *TDengine) QueryGroupBy(ctx context.Context, start, end time.Time, grou
         `, db.database, start.Format("2006-01-02 15:04:05"), end.Format("2006-01-02 15:04:05"), intervalStr)
 	}
 
+	fmt.Printf(query)
 	rows, err := db.db.QueryContext(ctx, query)
 	if err != nil {
 		return nil, err

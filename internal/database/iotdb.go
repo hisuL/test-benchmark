@@ -320,6 +320,7 @@ func (db *IoTDB) QueryByDeviceAndTimeRange(ctx context.Context, deviceID string,
         ORDER BY time
     `, deviceID, start.UnixMilli(), end.UnixMilli())
 
+	fmt.Printf(sql)
 	var timeout int64 = 60000 // 60秒超时
 	sessionDataSet, err := session.ExecuteQueryStatement(sql, &timeout)
 	if err != nil {
@@ -426,6 +427,7 @@ func (db *IoTDB) QueryAggregation(ctx context.Context, deviceID string, start, e
         WHERE time >= %d AND time <= %d
     `, aggFunc, deviceID, start.UnixMilli(), end.UnixMilli())
 
+	fmt.Printf(sql)
 	var timeout int64 = 60000
 	sessionDataSet, err := session.ExecuteQueryStatement(sql, &timeout)
 	if err != nil {
@@ -477,6 +479,7 @@ func (db *IoTDB) QueryTimeRange(ctx context.Context, start, end time.Time, limit
         LIMIT %d
     `, start.UnixMilli(), end.UnixMilli(), limit)
 
+	fmt.Printf(sql)
 	var timeout int64 = 60000
 	sessionDataSet, err := session.ExecuteQueryStatement(sql, &timeout)
 	if err != nil {
@@ -637,6 +640,7 @@ func (db *IoTDB) QueryGroupBy(ctx context.Context, start, end time.Time, groupBy
 	}
 
 	var timeout int64 = 60000
+	fmt.Printf(sql)
 	sessionDataSet, err := session.ExecuteQueryStatement(sql, &timeout)
 	if err != nil {
 		return nil, err

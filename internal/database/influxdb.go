@@ -99,6 +99,7 @@ func (db *InfluxDB) QueryByDeviceAndTimeRange(ctx context.Context, deviceID stri
         |> filter(fn: (r) => r.device_id == "%s")
         |> pivot(rowKey:["_time"], columnKey: ["_field"], valueColumn: "_value")
     `, db.bucket, start.Format(time.RFC3339), end.Format(time.RFC3339), deviceID)
+	fmt.Printf(queryStr)
 
 	result, err := db.queryAPI.Query(ctx, queryStr)
 	if err != nil {
@@ -150,7 +151,7 @@ func (db *InfluxDB) QueryAggregation(ctx context.Context, deviceID string, start
         |> filter(fn: (r) => r._field == "temperature")
         |> %s
     `, db.bucket, start.Format(time.RFC3339), end.Format(time.RFC3339), deviceID, aggFunc)
-
+	fmt.Printf(queryStr)
 	result, err := db.queryAPI.Query(ctx, queryStr)
 	if err != nil {
 		return 0, err
@@ -172,6 +173,7 @@ func (db *InfluxDB) QueryTimeRange(ctx context.Context, start, end time.Time, li
         |> pivot(rowKey:["_time"], columnKey: ["_field"], valueColumn: "_value")
     `, db.bucket, start.Format(time.RFC3339), end.Format(time.RFC3339), limit)
 
+	fmt.Printf(queryStr)
 	result, err := db.queryAPI.Query(ctx, queryStr)
 	if err != nil {
 		return nil, err
@@ -220,7 +222,7 @@ func (db *InfluxDB) QueryGroupBy(ctx context.Context, start, end time.Time, grou
         %s
         |> mean()
     `, db.bucket, start.Format(time.RFC3339), end.Format(time.RFC3339), groupByClause)
-
+	fmt.Printf(queryStr)
 	result, err := db.queryAPI.Query(ctx, queryStr)
 	if err != nil {
 		return nil, err
