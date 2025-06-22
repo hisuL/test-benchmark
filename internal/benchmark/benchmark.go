@@ -283,10 +283,9 @@ func (b *Benchmark) executeQuery(ctx context.Context, db database.Database, quer
 	}
 
 	var err error
-	factoryId := db.GetRandomFactoryId(ctx)
-	deviceID := db.GetRandomDeviceId(ctx, factoryId)
-	start := db.GetStartTime(ctx, factoryId, deviceID)
-	end := db.GetEndTime(ctx, factoryId, deviceID)
+	deviceID := "device_111"
+	start := time.Date(2025, 6, 21, 11, 0, 0, 0, time.UTC)
+	end := time.Date(2025, 6, 22, 11, 0, 0, 0, time.UTC)
 
 	switch queryType {
 	case "point_query":
