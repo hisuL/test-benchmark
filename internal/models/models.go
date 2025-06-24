@@ -18,11 +18,13 @@ type SensorData struct {
 	Status          string    `json:"status"`
 	ErrorCode       int32     `json:"error_code"`
 	ProductionCount int64     `json:"production_count"`
+	JobId           string    `json:"job_id"` // 任务ID
 }
 
 type WriteResult struct {
 	Database     string        `json:"database"`
 	TotalRecords int64         `json:"total_records"`
+	JobCount     int           `json:"job_count"`
 	Duration     time.Duration `json:"duration"`
 	Throughput   float64       `json:"throughput"` // records per second
 	AvgLatency   time.Duration `json:"avg_latency"`

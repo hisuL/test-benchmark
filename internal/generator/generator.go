@@ -47,6 +47,7 @@ func (g *DataGenerator) GenerateData() ([]models.SensorData, error) {
 
 	recordCount := int64(0)
 
+	allJobIndex := g.config.JobCount
 	for factoryId := 1; factoryId <= g.config.FactoryCount; factoryId++ {
 		for deviceId := 1; deviceId <= devicesPerFactory && recordCount < g.config.TotalRecords; deviceId++ {
 			factoryName := fmt.Sprintf("factory_%03d", factoryId)
@@ -54,7 +55,9 @@ func (g *DataGenerator) GenerateData() ([]models.SensorData, error) {
 
 			currentTime := startTime
 			for currentTime.Before(endTime) && recordCount < g.config.TotalRecords {
-				record := g.generateSensorRecord(factoryName, deviceName, currentTime)
+				// 在allJobIndex 随机生成一个Job ID
+				jobId := fmt.Sprintf("job_%03d", g.rand.Intn(allJobIndex)+1)
+				record := g.generateSensorRecord(factoryName, jobId, deviceName, currentTime)
 				data = append(data, record)
 
 				currentTime = currentTime.Add(samplingInterval)
@@ -66,7 +69,7 @@ func (g *DataGenerator) GenerateData() ([]models.SensorData, error) {
 	return data, nil
 }
 
-func (g *DataGenerator) generateSensorRecord(factoryId, deviceId string, timestamp time.Time) models.SensorData {
+func (g *DataGenerator) generateSensorRecord(factoryId, jobid string, deviceId string, timestamp time.Time) models.SensorData {
 	// Generate realistic sensor data with some correlation
 	baseTemp := 20.0 + g.rand.Float32()*30.0 // 20-50°C
 	humidity := 30.0 + g.rand.Float32()*40.0 // 30-70%
@@ -92,6 +95,7 @@ func (g *DataGenerator) generateSensorRecord(factoryId, deviceId string, timesta
 	return models.SensorData{
 		Timestamp:       timestamp,
 		FactoryID:       factoryId,
+		JobId:           jobid,
 		DeviceID:        deviceId,
 		Temperature:     baseTemp,
 		Humidity:        humidity,
@@ -162,7 +166,10 @@ func (g *DataGenerator) GenerateBatches(batchSize int) (<-chan []models.SensorDa
 
 				currentTime := startTime
 				for currentTime.Before(endTime) && recordCount < g.config.TotalRecords {
-					record := g.generateSensorRecord(factoryName, deviceName, currentTime)
+					// 在allJobIndex 随机生成一个Job ID
+					allJobIndex := g.config.JobCount
+					jobId := fmt.Sprintf("job_%03d", g.rand.Intn(allJobIndex)+1)
+					record := g.generateSensorRecord(factoryName, jobId, deviceName, currentTime)
 					batch = append(batch, record)
 					recordCount++
 

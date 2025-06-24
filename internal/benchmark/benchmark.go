@@ -24,6 +24,7 @@ type Benchmark struct {
 	logger    *logrus.Logger
 	databases []database.Database
 	testData  []models.SensorData
+	jobCount  int
 }
 
 func NewBenchmark(cfg *config.Config, logger *logrus.Logger) *Benchmark {
@@ -48,6 +49,7 @@ func (b *Benchmark) GenerateTestData() error {
 
 	b.testData = data
 	b.logger.Infof("Generated %d test records", len(data))
+	b.jobCount = b.config.DataGeneration.JobCount
 
 	return nil
 }
@@ -133,6 +135,7 @@ func (b *Benchmark) measureWritePerformance(ctx context.Context, db database.Dat
 	return models.WriteResult{
 		Database:     db.Name(),
 		TotalRecords: int64(len(b.testData)),
+		JobCount:     b.jobCount,
 		Duration:     totalDuration,
 		Throughput:   throughput,
 		AvgLatency:   time.Duration(avgLatency * 1e6), // Convert back to nanoseconds
@@ -340,14 +343,15 @@ func (b *Benchmark) PrintResults(report *models.BenchmarkReport) {
 	// Write performance results
 	fmt.Println("WRITE PERFORMANCE")
 	fmt.Println(strings.Repeat("-", 80))
-	fmt.Printf("%-12s %-12s %-12s %-12s %-12s %-12s\n",
+	fmt.Printf("%-12s %-12s %-12s %-12s %-12s %-12s %-12s\n",
 		"Database", "Records", "Duration", "Throughput", "Avg Latency", "P99 Latency")
 	fmt.Println(strings.Repeat("-", 80))
 
 	for _, result := range report.WriteResults {
-		fmt.Printf("%-12s %-12d %-12s %-12.0f %-12s %-12s\n",
+		fmt.Printf("%-12s %-12d %-12d %-12s %-12.0f %-12s %-12s\n",
 			result.Database,
 			result.TotalRecords,
+			result.JobCount,
 			result.Duration.Round(time.Second),
 			result.Throughput,
 			result.AvgLatency.Round(time.Millisecond),

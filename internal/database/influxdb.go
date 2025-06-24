@@ -73,6 +73,7 @@ func (db *InfluxDB) WriteBatch(ctx context.Context, data []models.SensorData) er
 			AddTag("factory_id", record.FactoryID).
 			AddTag("device_id", record.DeviceID).
 			AddTag("status", record.Status).
+			AddTag("job_id", record.JobId).
 			AddField("temperature", record.Temperature).
 			AddField("humidity", record.Humidity).
 			AddField("pressure", record.Pressure).
@@ -91,14 +92,15 @@ func (db *InfluxDB) WriteBatch(ctx context.Context, data []models.SensorData) er
 	return nil
 }
 
-func (db *InfluxDB) QueryByDeviceAndTimeRange(ctx context.Context, deviceID string, start, end time.Time) ([]models.SensorData, error) {
+func (db *InfluxDB) QueryByDeviceAndTimeRange(ctx context.Context, jobId string, deviceID string, start, end time.Time) ([]models.SensorData, error) {
 	queryStr := fmt.Sprintf(`
         from(bucket: "%s")
         |> range(start: %s, stop: %s)
         |> filter(fn: (r) => r._measurement == "sensor_data")
         |> filter(fn: (r) => r.device_id == "%s")
+		|> filter(fn: (r) => r.job_id == "%s")
         |> pivot(rowKey:["_time"], columnKey: ["_field"], valueColumn: "_value")
-    `, db.bucket, start.Format(time.RFC3339), end.Format(time.RFC3339), deviceID)
+    `, db.bucket, start.Format(time.RFC3339), end.Format(time.RFC3339), deviceID, jobId)
 	fmt.Printf(queryStr)
 
 	result, err := db.queryAPI.Query(ctx, queryStr)
@@ -126,11 +128,12 @@ func (db *InfluxDB) QueryByDeviceAndTimeRange(ctx context.Context, deviceID stri
 		}
 		data = append(data, sensorData)
 	}
+	fmt.Printf("QueryByDeviceAndTimeRange Data size: %d\n", len(data))
 
 	return data, result.Err()
 }
 
-func (db *InfluxDB) QueryAggregation(ctx context.Context, deviceID string, start, end time.Time, aggType string) (float32, error) {
+func (db *InfluxDB) QueryAggregation(ctx context.Context, jobId string, deviceID string, start, end time.Time, aggType string) (float32, error) {
 	var aggFunc string
 	switch aggType {
 	case "avg":
@@ -148,31 +151,39 @@ func (db *InfluxDB) QueryAggregation(ctx context.Context, deviceID string, start
         |> range(start: %s, stop: %s)
         |> filter(fn: (r) => r._measurement == "sensor_data")
         |> filter(fn: (r) => r.device_id == "%s")
+        |> filter(fn: (r) => r.job_id == "%s")
         |> filter(fn: (r) => r._field == "temperature")
-        |> %s
-    `, db.bucket, start.Format(time.RFC3339), end.Format(time.RFC3339), deviceID, aggFunc)
-	fmt.Printf(queryStr)
+        |> aggregateWindow(every: 1m, fn: %s, createEmpty: false)
+        |> yield(name: "minute_aggregation")
+    `, db.bucket, start.Format(time.RFC3339), end.Format(time.RFC3339), deviceID, jobId, aggFunc)
+
+	fmt.Printf("Query: %s\n", queryStr)
+
 	result, err := db.queryAPI.Query(ctx, queryStr)
 	if err != nil {
 		return 0, err
 	}
+	defer result.Close()
 
-	if result.Next() {
-		return getFloatValue(result.Record(), "_value"), nil
+	dataSize := 0
+	for result.Next() {
+		dataSize += 1
 	}
 
-	return 0, result.Err()
+	fmt.Printf("QueryAggregation Data size: %d\n", dataSize)
+	return 0, nil
 }
 
-func (db *InfluxDB) QueryTimeRange(ctx context.Context, start, end time.Time, limit int) ([]models.SensorData, error) {
+func (db *InfluxDB) QueryTimeRange(ctx context.Context, jobId string, start, end time.Time, limit int) ([]models.SensorData, error) {
 	queryStr := fmt.Sprintf(`
         from(bucket: "%s")
         |> range(start: %s, stop: %s)
         |> filter(fn: (r) => r._measurement == "sensor_data")
+		|> filter(fn: (r) => r.job_id == "%s")
         |> filter(fn: (r) => r._field == "temperature")
         |> limit(n: %d)
         |> pivot(rowKey:["_time"], columnKey: ["_field"], valueColumn: "_value")
-    `, db.bucket, start.Format(time.RFC3339), end.Format(time.RFC3339), limit)
+    `, db.bucket, start.Format(time.RFC3339), end.Format(time.RFC3339), jobId, limit)
 
 	fmt.Printf(queryStr)
 	result, err := db.queryAPI.Query(ctx, queryStr)
@@ -181,8 +192,10 @@ func (db *InfluxDB) QueryTimeRange(ctx context.Context, start, end time.Time, li
 	}
 
 	var data []models.SensorData
+	dataSize := 0
 	for result.Next() {
 		record := result.Record()
+		dataSize += 1
 		sensorData := models.SensorData{
 			Timestamp:       record.Time(),
 			FactoryID:       getStringValue(record, "factory_id"),
@@ -201,10 +214,11 @@ func (db *InfluxDB) QueryTimeRange(ctx context.Context, start, end time.Time, li
 		data = append(data, sensorData)
 	}
 
+	fmt.Printf("QueryTimeRange Data size: %d\n", dataSize)
 	return data, result.Err()
 }
 
-func (db *InfluxDB) QueryGroupBy(ctx context.Context, start, end time.Time, groupBy string, interval time.Duration) (map[string]float32, error) {
+func (db *InfluxDB) QueryGroupBy(ctx context.Context, jobId string, start, end time.Time, groupBy string, interval time.Duration) (map[string]float32, error) {
 	var groupByClause string
 	switch groupBy {
 	case "device":
@@ -220,9 +234,10 @@ func (db *InfluxDB) QueryGroupBy(ctx context.Context, start, end time.Time, grou
         |> range(start: %s, stop: %s)
         |> filter(fn: (r) => r._measurement == "sensor_data")
         |> filter(fn: (r) => r._field == "temperature")
+		|> filter(fn: (r) => r.job_id == "%s")
         %s
         |> mean()
-    `, db.bucket, start.Format(time.RFC3339), end.Format(time.RFC3339), groupByClause)
+    `, db.bucket, start.Format(time.RFC3339), end.Format(time.RFC3339), jobId, groupByClause)
 	fmt.Printf(queryStr)
 	result, err := db.queryAPI.Query(ctx, queryStr)
 	if err != nil {
@@ -230,6 +245,7 @@ func (db *InfluxDB) QueryGroupBy(ctx context.Context, start, end time.Time, grou
 	}
 
 	data := make(map[string]float32)
+	dataSize := 0
 	for result.Next() {
 		record := result.Record()
 		key := fmt.Sprintf("%v", record.ValueByKey(groupBy+"_id"))
@@ -237,8 +253,10 @@ func (db *InfluxDB) QueryGroupBy(ctx context.Context, start, end time.Time, grou
 			key = record.Time().Format(time.RFC3339)
 		}
 		data[key] = getFloatValue(record, "_value")
+		dataSize += 1
 	}
 
+	fmt.Printf("QueryGroupBy Data size: %d\n", dataSize)
 	return data, result.Err()
 }
 
@@ -284,145 +302,4 @@ func getIntValue(record *query.FluxRecord, key string) int64 {
 		return i
 	}
 	return 0
-}
-
-// GetRandomFactoryId 从数据库里获取一个存在的随机的 factoryId
-func (db *InfluxDB) GetRandomFactoryId(ctx context.Context) string {
-	queryStr := fmt.Sprintf(`
-        from(bucket: "%s")
-        |> range(start: -30d)
-        |> filter(fn: (r) => r._measurement == "sensor_data")
-        |> keep(columns: ["factory_id"])
-        |> distinct(column: "factory_id")
-        |> limit(n: 1)
-    `, db.bucket)
-
-	result, err := db.queryAPI.Query(ctx, queryStr)
-	if err != nil {
-		return ""
-	}
-
-	if result.Next() {
-		return getStringValue(result.Record(), "factory_id")
-	}
-
-	return ""
-}
-
-// GetRandomDeviceId 从数据库里获取一个存在的随机的 deviceId
-func (db *InfluxDB) GetRandomDeviceId(ctx context.Context, factoryId string) string {
-	var factoryFilter string
-	if factoryId != "" {
-		factoryFilter = fmt.Sprintf(`|> filter(fn: (r) => r.factory_id == "%s")`, factoryId)
-	}
-
-	queryStr := fmt.Sprintf(`
-        from(bucket: "%s")
-        |> range(start: -30d)
-        |> filter(fn: (r) => r._measurement == "sensor_data")
-        %s
-        |> keep(columns: ["device_id"])
-        |> distinct(column: "device_id")
-        |> limit(n: 1)
-    `, db.bucket, factoryFilter)
-
-	result, err := db.queryAPI.Query(ctx, queryStr)
-	if err != nil {
-		return ""
-	}
-
-	if result.Next() {
-		return getStringValue(result.Record(), "device_id")
-	}
-
-	return ""
-}
-
-// GetStartTime 从数据库里获取指定 factoryId 和 deviceId 的数据的起始时间
-func (db *InfluxDB) GetStartTime(ctx context.Context, factoryId string, deviceId string) time.Time {
-	var filters []string
-	if factoryId != "" {
-		filters = append(filters, fmt.Sprintf(`|> filter(fn: (r) => r.factory_id == "%s")`, factoryId))
-	}
-	if deviceId != "" {
-		filters = append(filters, fmt.Sprintf(`|> filter(fn: (r) => r.device_id == "%s")`, deviceId))
-	}
-
-	filterStr := ""
-	for _, filter := range filters {
-		filterStr += filter + "\n        "
-	}
-
-	queryStr := fmt.Sprintf(`
-        from(bucket: "%s")
-        |> range(start: -365d)
-        |> filter(fn: (r) => r._measurement == "sensor_data")
-        %s
-        |> first()
-        |> keep(columns: ["_time"])
-    `, db.bucket, filterStr)
-
-	result, err := db.queryAPI.Query(ctx, queryStr)
-	if err != nil {
-		return time.Time{}
-	}
-
-	if result.Next() {
-		return result.Record().Time()
-	}
-
-	return time.Time{}
-}
-
-// GetEndTime 从数据库里获取指定 factoryId 和 deviceId 的数据的结束时间
-func (db *InfluxDB) GetEndTime(ctx context.Context, factoryId string, deviceId string) time.Time {
-	var filters []string
-	if factoryId != "" {
-		filters = append(filters, fmt.Sprintf(`|> filter(fn: (r) => r.factory_id == "%s")`, factoryId))
-	}
-	if deviceId != "" {
-		filters = append(filters, fmt.Sprintf(`|> filter(fn: (r) => r.device_id == "%s")`, deviceId))
-	}
-
-	filterStr := ""
-	for _, filter := range filters {
-		filterStr += filter + "\n        "
-	}
-
-	queryStr := fmt.Sprintf(`
-        from(bucket: "%s")
-        |> range(start: -365d)
-        |> filter(fn: (r) => r._measurement == "sensor_data")
-        %s
-        |> last()
-        |> keep(columns: ["_time"])
-    `, db.bucket, filterStr)
-
-	result, err := db.queryAPI.Query(ctx, queryStr)
-	if err != nil {
-		return time.Time{}
-	}
-
-	if result.Next() {
-		return result.Record().Time()
-	}
-
-	return time.Time{}
-}
-
-// RemoveALLData 清除数据库中的所有数据
-func (db *InfluxDB) RemoveALLData(ctx context.Context) error {
-	// 使用 InfluxDB 的 Delete API 来删除所有数据
-	deleteAPI := db.client.DeleteAPI()
-
-	// 删除指定时间范围内的所有数据（这里使用一个很大的时间范围）
-	start := time.Date(1970, 1, 1, 0, 0, 0, 0, time.UTC)
-	stop := time.Now().Add(24 * time.Hour) // 明天
-
-	err := deleteAPI.DeleteWithName(ctx, db.org, db.bucket, start, stop, "")
-	if err != nil {
-		return fmt.Errorf("failed to delete all data: %w", err)
-	}
-
-	return nil
 }

@@ -118,6 +118,8 @@ func (db *TDengine) WriteBatch(ctx context.Context, data []models.SensorData) er
 	for deviceKey, records := range deviceGroups {
 		tableName := fmt.Sprintf("sensor_%s", strings.ReplaceAll(deviceKey, "-", "_"))
 
+		//TODO 是否要把jobId作为Tag
+
 		// Create table if not exists
 		createTableSQL := fmt.Sprintf(`
             CREATE TABLE IF NOT EXISTS %s USING sensor_data TAGS ('%s', '%s')
@@ -131,7 +133,7 @@ func (db *TDengine) WriteBatch(ctx context.Context, data []models.SensorData) er
 		// Batch insert
 		var values []string
 		for _, record := range records {
-			value := fmt.Sprintf("('%s', %f, %f, %f, %f, %f, %f, %d, '%s', %d, %d)",
+			value := fmt.Sprintf("('%s', %f, %f, %f, %f, %f, %f, %d, '%s', %d, %d, '%s')",
 				record.Timestamp.Format("2006-01-02 15:04:05.000"),
 				record.Temperature,
 				record.Humidity,
@@ -143,6 +145,7 @@ func (db *TDengine) WriteBatch(ctx context.Context, data []models.SensorData) er
 				record.Status,
 				record.ErrorCode,
 				record.ProductionCount,
+				record.JobId,
 			)
 			values = append(values, value)
 		}
@@ -160,14 +163,14 @@ func (db *TDengine) WriteBatch(ctx context.Context, data []models.SensorData) er
 	return nil
 }
 
-func (db *TDengine) QueryByDeviceAndTimeRange(ctx context.Context, deviceID string, start, end time.Time) ([]models.SensorData, error) {
+func (db *TDengine) QueryByDeviceAndTimeRange(ctx context.Context, jobId string, deviceID string, start, end time.Time) ([]models.SensorData, error) {
 	query := fmt.Sprintf(`
         USE %s;
         SELECT ts, temperature, humidity, pressure, voltage, current, power, rpm, status, error_code, production_count
         FROM sensor_data 
-        WHERE device_id = '%s' AND ts >= '%s' AND ts <= '%s'
+        WHERE device_id = '%s' AND ts >= '%s' AND ts <= '%s' AND job_id = '%s'
         ORDER BY ts
-    `, db.database, deviceID, start.Format("2006-01-02 15:04:05"), end.Format("2006-01-02 15:04:05"))
+    `, db.database, deviceID, start.Format("2006-01-02 15:04:05"), end.Format("2006-01-02 15:04:05"), jobId)
 
 	rows, err := db.db.QueryContext(ctx, query)
 	if err != nil {
@@ -196,7 +199,7 @@ func (db *TDengine) QueryByDeviceAndTimeRange(ctx context.Context, deviceID stri
 	return data, rows.Err()
 }
 
-func (db *TDengine) QueryAggregation(ctx context.Context, deviceID string, start, end time.Time, aggType string) (float32, error) {
+func (db *TDengine) QueryAggregation(ctx context.Context, jobId string, deviceID string, start, end time.Time, aggType string) (float32, error) {
 	var aggFunc string
 	switch aggType {
 	case "avg":
@@ -212,8 +215,8 @@ func (db *TDengine) QueryAggregation(ctx context.Context, deviceID string, start
 	query := fmt.Sprintf(`
         USE %s;
         SELECT %s FROM sensor_data 
-        WHERE device_id = '%s' AND ts >= '%s' AND ts <= '%s'
-    `, db.database, aggFunc, deviceID, start.Format("2006-01-02 15:04:05"), end.Format("2006-01-02 15:04:05"))
+        WHERE device_id = '%s' AND ts >= '%s' AND ts <= '%s' AND job_id = '%s'
+    `, db.database, aggFunc, deviceID, start.Format("2006-01-02 15:04:05"), end.Format("2006-01-02 15:04:05"), jobId)
 
 	fmt.Printf(query)
 	var result float32
@@ -221,15 +224,15 @@ func (db *TDengine) QueryAggregation(ctx context.Context, deviceID string, start
 	return result, err
 }
 
-func (db *TDengine) QueryTimeRange(ctx context.Context, start, end time.Time, limit int) ([]models.SensorData, error) {
+func (db *TDengine) QueryTimeRange(ctx context.Context, jobId string, start, end time.Time, limit int) ([]models.SensorData, error) {
 	query := fmt.Sprintf(`
         USE %s;
         SELECT ts, temperature, humidity, pressure, voltage, current, power, rpm, status, error_code, production_count, factory_id, device_id
         FROM sensor_data 
-        WHERE ts >= '%s' AND ts <= '%s'
+        WHERE ts >= '%s' AND ts <= '%s' AND job_id = '%s'
         ORDER BY ts
         LIMIT %d
-    `, db.database, start.Format("2006-01-02 15:04:05"), end.Format("2006-01-02 15:04:05"), limit)
+    `, db.database, start.Format("2006-01-02 15:04:05"), end.Format("2006-01-02 15:04:05"), jobId, limit)
 
 	fmt.Printf(query)
 	rows, err := db.db.QueryContext(ctx, query)
@@ -258,7 +261,7 @@ func (db *TDengine) QueryTimeRange(ctx context.Context, start, end time.Time, li
 	return data, rows.Err()
 }
 
-func (db *TDengine) QueryGroupBy(ctx context.Context, start, end time.Time, groupBy string, interval time.Duration) (map[string]float32, error) {
+func (db *TDengine) QueryGroupBy(ctx context.Context, jobId string, start, end time.Time, groupBy string, interval time.Duration) (map[string]float32, error) {
 	var query string
 
 	switch groupBy {
@@ -266,25 +269,25 @@ func (db *TDengine) QueryGroupBy(ctx context.Context, start, end time.Time, grou
 		query = fmt.Sprintf(`
             USE %s;
             SELECT device_id, AVG(temperature) FROM sensor_data 
-            WHERE ts >= '%s' AND ts <= '%s'
+            WHERE ts >= '%s' AND ts <= '%s' AND job_id = '%s'
             GROUP BY device_id
-        `, db.database, start.Format("2006-01-02 15:04:05"), end.Format("2006-01-02 15:04:05"))
+        `, db.database, start.Format("2006-01-02 15:04:05"), end.Format("2006-01-02 15:04:05"), jobId)
 	case "factory":
 		query = fmt.Sprintf(`
             USE %s;
             SELECT factory_id, AVG(temperature) FROM sensor_data 
-            WHERE ts >= '%s' AND ts <= '%s'
+            WHERE ts >= '%s' AND ts <= '%s' AND job_id = '%s'
             GROUP BY factory_id
-        `, db.database, start.Format("2006-01-02 15:04:05"), end.Format("2006-01-02 15:04:05"))
+        `, db.database, start.Format("2006-01-02 15:04:05"), end.Format("2006-01-02 15:04:05"), jobId)
 	default:
 		// Time-based grouping
 		intervalStr := fmt.Sprintf("%ds", int(interval.Seconds()))
 		query = fmt.Sprintf(`
             USE %s;
             SELECT _wstart, AVG(temperature) FROM sensor_data 
-            WHERE ts >= '%s' AND ts <= '%s'
+            WHERE ts >= '%s' AND ts <= '%s' AND job_id = '%s'
             INTERVAL(%s)
-        `, db.database, start.Format("2006-01-02 15:04:05"), end.Format("2006-01-02 15:04:05"), intervalStr)
+        `, db.database, start.Format("2006-01-02 15:04:05"), end.Format("2006-01-02 15:04:05"), jobId, intervalStr)
 	}
 
 	fmt.Printf(query)

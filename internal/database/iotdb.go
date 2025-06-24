@@ -3,7 +3,6 @@ package database
 import (
 	"context"
 	"fmt"
-	"math/rand"
 	"strconv"
 	"strings"
 	"sync"
@@ -177,13 +176,13 @@ func (db *IoTDB) WriteBatch(ctx context.Context, data []models.SensorData) error
 		measurements := []string{
 			"temperature", "humidity", "pressure", "voltage",
 			"current", "power", "rpm", "status",
-			"error_code", "production_count",
+			"error_code", "production_count", "job_id",
 		}
 
 		types := []client.TSDataType{
 			client.FLOAT, client.FLOAT, client.FLOAT, client.FLOAT,
 			client.FLOAT, client.FLOAT, client.INT64, client.TEXT,
-			client.INT32, client.INT64,
+			client.INT32, client.INT64, client.TEXT,
 		}
 
 		// 预创建对齐时间序列（如果不存在）
@@ -202,7 +201,7 @@ func (db *IoTDB) WriteBatch(ctx context.Context, data []models.SensorData) error
 				float32(record.Pressure), float32(record.Voltage),
 				float32(record.Current), float32(record.Power),
 				int64(record.RPM), record.Status,
-				int32(record.ErrorCode), int64(record.ProductionCount),
+				int32(record.ErrorCode), int64(record.ProductionCount), record.JobId,
 			}
 
 			measurementsList = append(measurementsList, measurements)
@@ -277,7 +276,7 @@ func (db *IoTDB) ensureAlignedTimeseriesExists(session client.Session, devicePat
 }
 
 // 修改后的查询方法 - 适配新的对齐时间序列结构
-func (db *IoTDB) QueryByDeviceAndTimeRange(ctx context.Context, deviceID string, start, end time.Time) ([]models.SensorData, error) {
+func (db *IoTDB) QueryByDeviceAndTimeRange(ctx context.Context, jobId string, deviceID string, start, end time.Time) ([]models.SensorData, error) {
 	session, err := db.sessionPool.GetSession()
 	if err != nil {
 		return nil, err
@@ -289,9 +288,9 @@ func (db *IoTDB) QueryByDeviceAndTimeRange(ctx context.Context, deviceID string,
 	sql := fmt.Sprintf(`
         SELECT temperature, humidity, pressure, voltage, current, power, rpm, status, error_code, production_count
         FROM root.*.%s
-        WHERE time >= %d AND time <= %d
+        WHERE time >= %d AND time <= %d AND job_id = '%s'
         ORDER BY time
-    `, deviceID, start.UnixMilli(), end.UnixMilli())
+    `, deviceID, start.UnixMilli(), end.UnixMilli(), jobId)
 
 	fmt.Printf(sql)
 	var timeout int64 = 60000 // 60秒超时
@@ -375,7 +374,7 @@ func (db *IoTDB) QueryByDeviceAndTimeRange(ctx context.Context, deviceID string,
 	return data, nil
 }
 
-func (db *IoTDB) QueryAggregation(ctx context.Context, deviceID string, start, end time.Time, aggType string) (float32, error) {
+func (db *IoTDB) QueryAggregation(ctx context.Context, jobId string, deviceID string, start, end time.Time, aggType string) (float32, error) {
 	session, err := db.sessionPool.GetSession()
 	if err != nil {
 		return 0, err
@@ -398,8 +397,8 @@ func (db *IoTDB) QueryAggregation(ctx context.Context, deviceID string, start, e
 	sql := fmt.Sprintf(`
         SELECT %s(temperature)
         FROM root.*.%s
-        WHERE time >= %d AND time <= %d
-    `, aggFunc, deviceID, start.UnixMilli(), end.UnixMilli())
+        WHERE time >= %d AND time <= %d AND job_id = '%s' GROUP BY ([%d, %d), 1m)
+    `, aggFunc, deviceID, start.UnixMilli(), end.UnixMilli(), jobId, start.UnixMilli(), end.UnixMilli())
 
 	fmt.Printf(sql)
 	var timeout int64 = 60000
@@ -433,7 +432,7 @@ func (db *IoTDB) QueryAggregation(ctx context.Context, deviceID string, start, e
 	return 0, nil
 }
 
-func (db *IoTDB) QueryTimeRange(ctx context.Context, start, end time.Time, limit int) ([]models.SensorData, error) {
+func (db *IoTDB) QueryTimeRange(ctx context.Context, jobId string, start, end time.Time, limit int) ([]models.SensorData, error) {
 	session, err := db.sessionPool.GetSession()
 	if err != nil {
 		return nil, err
@@ -444,9 +443,9 @@ func (db *IoTDB) QueryTimeRange(ctx context.Context, start, end time.Time, limit
 	sql := fmt.Sprintf(`
         SELECT temperature
         FROM root.**
-        WHERE time >= %d AND time <= %d
+        WHERE time >= %d AND time <= %d AND job_id = '%s'
         LIMIT %d
-    `, start.UnixMilli(), end.UnixMilli(), limit)
+    `, start.UnixMilli(), end.UnixMilli(), jobId, limit)
 
 	fmt.Printf(sql)
 	var timeout int64 = 60000
@@ -502,7 +501,7 @@ func (db *IoTDB) QueryTimeRange(ctx context.Context, start, end time.Time, limit
 	return data, nil
 }
 
-func (db *IoTDB) QueryGroupBy(ctx context.Context, start, end time.Time, groupBy string, interval time.Duration) (map[string]float32, error) {
+func (db *IoTDB) QueryGroupBy(ctx context.Context, jobId string, start, end time.Time, groupBy string, interval time.Duration) (map[string]float32, error) {
 	session, err := db.sessionPool.GetSession()
 	if err != nil {
 		return nil, err
@@ -517,26 +516,26 @@ func (db *IoTDB) QueryGroupBy(ctx context.Context, start, end time.Time, groupBy
 		sql = fmt.Sprintf(`
             SELECT avg(temperature) AS avg_temp 
             FROM root.**
-            WHERE time >= %d AND time <= %d
+            WHERE time >= %d AND time <= %d and job_id = '%s'
             GROUP BY LEVEL=3
-        `, start.UnixMilli(), end.UnixMilli())
+        `, start.UnixMilli(), end.UnixMilli(), jobId)
 	case "factory":
 		// 按工厂分组
 		sql = fmt.Sprintf(`
             SELECT avg(temperature) AS avg_temp 
             FROM root.**
-            WHERE time >= %d AND time <= %d
+            WHERE time >= %d AND time <= %d and job_id = '%s'
             GROUP BY LEVEL=2
-        `, start.UnixMilli(), end.UnixMilli())
+        `, start.UnixMilli(), end.UnixMilli(), jobId)
 	case "time":
 		// 按时间间隔分组
 		intervalStr := formatInterval(interval)
 		sql = fmt.Sprintf(`
             SELECT avg(temperature) AS avg_temp 
             FROM root.**
-            WHERE time >= %d AND time <= %d
+            WHERE time >= %d AND time <= %d AND job_id = '%s'
             GROUP BY ([%d, %d), %s)
-        `, start.UnixMilli(), end.UnixMilli(), start.UnixMilli(), end.UnixMilli(), intervalStr)
+        `, start.UnixMilli(), end.UnixMilli(), jobId, start.UnixMilli(), end.UnixMilli(), intervalStr)
 	default:
 		return nil, fmt.Errorf("unsupported groupBy type: %s", groupBy)
 	}
@@ -622,251 +621,6 @@ func (db *IoTDB) Ping(ctx context.Context) error {
 		return err
 	}
 	defer sessionDataSet.Close()
-	return nil
-}
-
-// 获取随机工厂ID
-func (db *IoTDB) GetRandomFactoryId(ctx context.Context) string {
-	session, err := db.sessionPool.GetSession()
-	if err != nil {
-		return "factory_001" // 默认返回
-	}
-	defer db.sessionPool.PutBack(session)
-
-	// 查询所有存在的工厂ID
-	sql := `SHOW DATABASES`
-	var timeout int64 = 10000
-	sessionDataSet, err := session.ExecuteQueryStatement(sql, &timeout)
-	if err != nil {
-		return "factory_001"
-	}
-	defer sessionDataSet.Close()
-
-	// 收集所有工厂ID
-	var factories []string
-	for {
-		hasNext, err := sessionDataSet.Next()
-		if err != nil {
-			fmt.Printf("GetRandomFactoryId error reading next record: %v\n", err)
-			return "factory_001" // 出现错误时返回默认值
-		}
-		if !hasNext {
-			break
-		}
-		record, err := sessionDataSet.GetRowRecord()
-		if err != nil || record == nil {
-			continue
-		}
-
-		if len(record.GetFields()) > 0 {
-			dbName := record.GetFields()[0].GetText()
-			if strings.HasPrefix(dbName, "root.factory_") {
-				factoryID := strings.TrimPrefix(dbName, "root.")
-				factories = append(factories, factoryID)
-			}
-		}
-	}
-
-	if len(factories) == 0 {
-		return "factory_001" // 如果没有找到工厂，返回默认值
-	}
-
-	// 随机选择一个工厂ID
-	rand.Seed(time.Now().UnixNano())
-	return factories[rand.Intn(len(factories))]
-}
-
-// 获取某个工厂下的随机设备ID
-func (db *IoTDB) GetRandomDeviceId(ctx context.Context, factoryId string) string {
-	session, err := db.sessionPool.GetSession()
-	if err != nil {
-		return "device_001" // 默认返回
-	}
-	defer db.sessionPool.PutBack(session)
-
-	// 如果未指定工厂ID，先获取一个随机工厂ID
-	if factoryId == "" {
-		factoryId = db.GetRandomFactoryId(ctx)
-	}
-
-	// 查询指定工厂下的所有设备
-	sql := fmt.Sprintf(`SHOW DEVICES root.%s.**`, factoryId)
-	var timeout int64 = 10000
-	sessionDataSet, err := session.ExecuteQueryStatement(sql, &timeout)
-	if err != nil {
-		return "device_001"
-	}
-	defer sessionDataSet.Close()
-
-	// 收集所有设备ID
-	var devices []string
-	for {
-		hasNext, err := sessionDataSet.Next()
-		if err != nil {
-			fmt.Printf("GetRandomDeviceId error reading next record: %v\n", err)
-			return "device_001"
-		}
-		if !hasNext {
-			break
-		}
-		record, err := sessionDataSet.GetRowRecord()
-		if err != nil || record == nil {
-			continue
-		}
-
-		if len(record.GetFields()) > 0 {
-			devicePath := record.GetFields()[0].GetText()
-			pathParts := strings.Split(devicePath, ".")
-			if len(pathParts) >= 3 {
-				deviceID := pathParts[2] // root.factoryID.deviceID
-				devices = append(devices, deviceID)
-			}
-		}
-	}
-
-	if len(devices) == 0 {
-		return "device_001" // 如果没有找到设备，返回默认值
-	}
-
-	// 随机选择一个设备ID
-	rand.Seed(time.Now().UnixNano())
-	return devices[rand.Intn(len(devices))]
-}
-
-// 获取指定工厂和设备数据的起始时间
-func (db *IoTDB) GetStartTime(ctx context.Context, factoryId string, deviceId string) time.Time {
-	session, err := db.sessionPool.GetSession()
-	if err != nil {
-		return time.Now().Add(-24 * time.Hour) // 默认返回24小时前
-	}
-	defer db.sessionPool.PutBack(session)
-
-	// 如果未指定工厂或设备ID，获取随机值
-	if factoryId == "" {
-		factoryId = db.GetRandomFactoryId(ctx)
-	}
-	if deviceId == "" {
-		deviceId = db.GetRandomDeviceId(ctx, factoryId)
-	}
-
-	// 查询最早的时间戳
-	sql := fmt.Sprintf(`SELECT first_value(temperature) FROM root.%s.%s`, factoryId, deviceId)
-	var timeout int64 = 10000
-	sessionDataSet, err := session.ExecuteQueryStatement(sql, &timeout)
-	if err != nil {
-		return time.Now().Add(-24 * time.Hour)
-	}
-	defer sessionDataSet.Close()
-
-	for {
-		hasNext, err := sessionDataSet.Next()
-		if err != nil {
-			fmt.Printf("GetStartTime error reading next record: %v\n", err)
-		}
-		if !hasNext {
-			break
-		}
-		record, err := sessionDataSet.GetRowRecord()
-		if err == nil && record != nil {
-			return time.UnixMilli(record.GetTimestamp())
-		}
-	}
-
-	return time.Now().Add(-24 * time.Hour) // 默认返回24小时前
-}
-
-// 获取指定工厂和设备数据的结束时间
-func (db *IoTDB) GetEndTime(ctx context.Context, factoryId string, deviceId string) time.Time {
-	session, err := db.sessionPool.GetSession()
-	if err != nil {
-		return time.Now() // 默认返回当前时间
-	}
-	defer db.sessionPool.PutBack(session)
-
-	// 如果未指定工厂或设备ID，获取随机值
-	if factoryId == "" {
-		factoryId = db.GetRandomFactoryId(ctx)
-	}
-	if deviceId == "" {
-		deviceId = db.GetRandomDeviceId(ctx, factoryId)
-	}
-
-	// 查询最晚的时间戳
-	sql := fmt.Sprintf(`SELECT last_value(temperature) FROM root.%s.%s`, factoryId, deviceId)
-	var timeout int64 = 10000
-	sessionDataSet, err := session.ExecuteQueryStatement(sql, &timeout)
-	if err != nil {
-		return time.Now()
-	}
-	defer sessionDataSet.Close()
-
-	for {
-		hasNext, err := sessionDataSet.Next()
-		if err != nil {
-			fmt.Printf("GetEndTime error reading next record: %v\n", err)
-		}
-		if !hasNext {
-			break
-		}
-		record, err := sessionDataSet.GetRowRecord()
-		if err == nil && record != nil {
-			return time.UnixMilli(record.GetTimestamp())
-		}
-	}
-
-	return time.Now() // 默认返回当前时间
-}
-
-// 清除数据库中的所有数据
-func (db *IoTDB) RemoveALLData(ctx context.Context) error {
-	session, err := db.sessionPool.GetSession()
-	if err != nil {
-		return err
-	}
-	defer db.sessionPool.PutBack(session)
-
-	// 1. 首先查询所有存储组（数据库）
-	dataSet, err := session.ExecuteQueryStatement("SHOW DATABASES", nil)
-	if err != nil {
-		return err
-	}
-
-	var dbNames []string
-	for {
-		hasNext, err := dataSet.Next()
-		if err != nil {
-			fmt.Printf("RemoveALLData error reading next record: %v\n", err)
-		}
-		if !hasNext {
-			break
-		}
-		record, err := dataSet.GetRowRecord()
-		if err != nil {
-			continue
-		}
-		if record != nil && len(record.GetFields()) > 0 {
-			dbName := record.GetFields()[0].GetText()
-			if strings.Contains(dbName, "factory_") {
-				dbNames = append(dbNames, dbName)
-			}
-		}
-	}
-	dataSet.Close()
-
-	// 2. 删除每个匹配的存储组中的数据
-	for _, dbName := range dbNames {
-		// 删除数据但保留结构
-		_, err = session.ExecuteNonQueryStatement(fmt.Sprintf("DELETE FROM %s.**", dbName))
-		if err != nil {
-			return fmt.Errorf("error deleting data from %s: %w", dbName, err)
-		}
-	}
-
-	// 3. 清除时间序列创建缓存
-	db.timeseriesCreationMutex.Lock()
-	db.createdTimeseries = make(map[string]bool)
-	db.timeseriesCreationMutex.Unlock()
-
 	return nil
 }
 

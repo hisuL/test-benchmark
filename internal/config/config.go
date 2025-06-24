@@ -19,6 +19,7 @@ type DataGenConfig struct {
 	SamplingRateMs int    `yaml:"sampling_rate_ms"`
 	BatchSize      int    `yaml:"batch_size"`
 	OutputFile     string `yaml:"output_file"`
+	JobCount       int    `yaml:"job_count"`
 }
 
 type DatabasesConfig struct {
