@@ -511,7 +511,7 @@ func (db *IoTDB) QueryGroupBy(ctx context.Context, jobId string, start, end time
 	var sql string
 
 	switch groupBy {
-	case "device":
+	case "status":
 		// 按设备分组
 		sql = fmt.Sprintf(`
             SELECT avg(temperature) AS avg_temp 

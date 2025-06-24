@@ -287,21 +287,22 @@ func (b *Benchmark) executeQuery(ctx context.Context, db database.Database, quer
 
 	var err error
 	deviceID := "device_111"
-	start := time.Date(2025, 6, 23, 05, 0, 0, 0, time.UTC)
-	end := time.Date(2025, 6, 24, 05, 0, 0, 0, time.UTC)
+	start := time.Date(2025, 6, 23, 11, 9, 0, 0, time.UTC)
+	end := time.Date(2025, 6, 24, 11, 9, 0, 0, time.UTC)
+	jobId := "job_110110"
 
 	switch queryType {
 	case "point_query":
-		_, err = db.QueryByDeviceAndTimeRange(ctx, deviceID, start, end)
+		_, err = db.QueryByDeviceAndTimeRange(ctx, jobId, deviceID, start, end)
 
 	case "aggregation":
-		_, err = db.QueryAggregation(ctx, deviceID, start, end, "avg")
+		_, err = db.QueryAggregation(ctx, jobId, deviceID, start, end, "avg")
 
 	case "range_query":
-		_, err = db.QueryTimeRange(ctx, start, end, 1000)
+		_, err = db.QueryTimeRange(ctx, jobId, start, end, 1000)
 
 	case "group_by":
-		_, err = db.QueryGroupBy(ctx, start, end, "device", 1*time.Hour)
+		_, err = db.QueryGroupBy(ctx, jobId, start, end, "status", 1*time.Hour)
 
 	default:
 		err = fmt.Errorf("unknown query type: %s", queryType)
@@ -344,7 +345,7 @@ func (b *Benchmark) PrintResults(report *models.BenchmarkReport) {
 	fmt.Println("WRITE PERFORMANCE")
 	fmt.Println(strings.Repeat("-", 80))
 	fmt.Printf("%-12s %-12s %-12s %-12s %-12s %-12s %-12s\n",
-		"Database", "Records", "Duration", "Throughput", "Avg Latency", "P99 Latency")
+		"Database", "Records", "jobCount", "Duration", "Throughput", "Avg Latency", "P99 Latency")
 	fmt.Println(strings.Repeat("-", 80))
 
 	for _, result := range report.WriteResults {
