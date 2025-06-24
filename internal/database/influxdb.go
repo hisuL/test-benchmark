@@ -169,6 +169,7 @@ func (db *InfluxDB) QueryTimeRange(ctx context.Context, start, end time.Time, li
         from(bucket: "%s")
         |> range(start: %s, stop: %s)
         |> filter(fn: (r) => r._measurement == "sensor_data")
+        |> filter(fn: (r) => r._field == "temperature")
         |> limit(n: %d)
         |> pivot(rowKey:["_time"], columnKey: ["_field"], valueColumn: "_value")
     `, db.bucket, start.Format(time.RFC3339), end.Format(time.RFC3339), limit)

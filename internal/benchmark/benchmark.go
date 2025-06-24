@@ -284,8 +284,8 @@ func (b *Benchmark) executeQuery(ctx context.Context, db database.Database, quer
 
 	var err error
 	deviceID := "device_111"
-	start := time.Date(2025, 6, 21, 03, 0, 0, 0, time.UTC)
-	end := time.Date(2025, 6, 22, 03, 0, 0, 0, time.UTC)
+	start := time.Date(2025, 6, 23, 05, 0, 0, 0, time.UTC)
+	end := time.Date(2025, 6, 24, 05, 0, 0, 0, time.UTC)
 
 	switch queryType {
 	case "point_query":

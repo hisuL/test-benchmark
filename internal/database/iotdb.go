@@ -10,25 +10,29 @@ import (
 	"time"
 
 	"github.com/apache/iotdb-client-go/client"
+	"github.com/apache/iotdb-client-go/common"
 	"test-benchmark/internal/models"
 )
 
 type IoTDB struct {
-	sessionPool             *client.SessionPool
+	sessionPool             client.SessionPool // 改为直接使用类型而不是指针
 	host                    string
 	port                    int
 	username                string
 	password                string
 	createdTimeseries       map[string]bool
 	timeseriesCreationMutex sync.Mutex
+	hasPool                 bool // 是否有可用的sessionPool
 }
 
 func NewIoTDB(host string, port int, username, password string) *IoTDB {
 	return &IoTDB{
-		host:     host,
-		port:     port,
-		username: username,
-		password: password,
+		host:              host,
+		port:              port,
+		username:          username,
+		password:          password,
+		createdTimeseries: make(map[string]bool),
+		hasPool:           false,
 	}
 }
 
@@ -38,14 +42,8 @@ func (db *IoTDB) Name() string {
 
 func (db *IoTDB) Connect(ctx context.Context) error {
 	// 如果sessionPool已经存在且可用，先验证连接有效性
-	if db.sessionPool != nil {
-		// 验证连接是否仍然有效
-		if err := db.Ping(ctx); err == nil {
-			return nil // 连接有效，直接返回
-		}
-		// 连接无效，关闭现有pool
-		db.sessionPool.Close()
-		db.sessionPool = nil
+	if db.hasPool {
+		return nil
 	}
 
 	config := &client.PoolConfig{
@@ -55,17 +53,14 @@ func (db *IoTDB) Connect(ctx context.Context) error {
 		Password: db.password,
 	}
 
-	// 创建sessionPool
-	pool := client.NewSessionPool(config, 50, 60000, 30000, false)
-	db.sessionPool = &pool
+	// 创建sessionPool - 直接赋值而不是取地址
+	db.sessionPool = client.NewSessionPool(config, 50, 60000, 30000, false)
+	db.hasPool = true
 	return db.Ping(ctx)
 }
 
 func (db *IoTDB) Close() error {
-	if db.sessionPool != nil {
-		db.sessionPool.Close()
-		db.sessionPool = nil
-	}
+	db.sessionPool.Close()
 	return nil
 }
 
@@ -76,39 +71,27 @@ func (db *IoTDB) CreateSchema(ctx context.Context) error {
 	}
 	defer db.sessionPool.PutBack(session)
 
-	// 查询现有存储组
-	dataSet, err := session.ExecuteQueryStatement("SHOW DATABASES", nil)
+	// 使用 SHOW STORAGE GROUP 而不是 SHOW DATABASES（兼容性更好）
+	dataSet, err := session.ExecuteStatement("SHOW STORAGE GROUP")
 	if err != nil {
 		return err
 	}
 	defer dataSet.Close()
 
-	// 检查是否需要创建存储组
 	existingDBs := make(map[string]bool)
-
-	for {
-		hasNext, err := dataSet.Next()
-		if err != nil {
-			return fmt.Errorf("CreateSchema error reading next record: %w", err)
-		}
-		if !hasNext {
-			break
-		}
-		record, err := dataSet.GetRowRecord()
-		if err != nil {
-			continue
-		}
-		if record != nil && len(record.GetFields()) > 0 {
-			dbName := record.GetFields()[0].GetText()
+	for next, err := dataSet.Next(); err == nil && next; next, err = dataSet.Next() {
+		// 按列名获取值，更安全
+		if dbName := dataSet.GetText("storage group"); err == nil {
 			existingDBs[dbName] = true
 		}
 	}
 
-	// 获取可能的工厂列表
+	// 创建存储组
 	factoryPrefixes := []string{"factory_001", "factory_002", "factory_003"}
 	for _, factory := range factoryPrefixes {
-		if !existingDBs[fmt.Sprintf("root.%s", factory)] {
-			_, err := session.ExecuteNonQueryStatement(fmt.Sprintf("CREATE DATABASE root.%s", factory))
+		storageGroup := fmt.Sprintf("root.%s", factory)
+		if !existingDBs[storageGroup] {
+			err = checkError(session.SetStorageGroup(storageGroup))
 			if err != nil && !strings.Contains(err.Error(), "already exists") {
 				return err
 			}
@@ -125,35 +108,25 @@ func (db *IoTDB) DropSchema(ctx context.Context) error {
 	}
 	defer db.sessionPool.PutBack(session)
 
-	// 列出所有存储组
-	dataSet, err := session.ExecuteQueryStatement("SHOW DATABASES", nil)
+	dataSet, err := session.ExecuteStatement("SHOW STORAGE GROUP")
 	if err != nil {
 		return err
 	}
 	defer dataSet.Close()
 
-	// 删除factory_前缀的存储组
-	for {
-		hasNext, err := dataSet.Next()
-		if err != nil {
-			fmt.Printf("DropSchema error reading next record: %v\n", err)
-		}
-		if !hasNext {
-			break
-		}
-		record, err := dataSet.GetRowRecord()
-		if err != nil {
-			continue
-		}
-		if record != nil && len(record.GetFields()) > 0 {
-			dbName := record.GetFields()[0].GetText()
-			if strings.Contains(dbName, "factory_") {
-				_, err := session.ExecuteNonQueryStatement(fmt.Sprintf("DROP DATABASE %s", dbName))
-				if err != nil {
-					return err
-				}
+	var storageGroups []string
+	for next, err := dataSet.Next(); err == nil && next; next, err = dataSet.Next() {
+		sgName := dataSet.GetText("storage group")
+		if sgName != "" {
+			if strings.Contains(sgName, "factory_") {
+				storageGroups = append(storageGroups, sgName)
 			}
 		}
+	}
+
+	// 批量删除存储组
+	if len(storageGroups) > 0 {
+		return checkError(session.DeleteStorageGroups(storageGroups...))
 	}
 
 	return nil
@@ -398,6 +371,7 @@ func (db *IoTDB) QueryByDeviceAndTimeRange(ctx context.Context, deviceID string,
 		data = append(data, sensorData)
 	}
 
+	fmt.Println("QueryByDeviceAndTimeRange data size:", len(data))
 	return data, nil
 }
 
@@ -431,35 +405,30 @@ func (db *IoTDB) QueryAggregation(ctx context.Context, deviceID string, start, e
 	var timeout int64 = 60000
 	sessionDataSet, err := session.ExecuteQueryStatement(sql, &timeout)
 	if err != nil {
+		fmt.Errorf("QueryAggregation ExecuteQueryStatement error executing statement: %w", err)
 		return 0, err
 	}
 	defer sessionDataSet.Close()
 
+	dataSize := 0
 	hasNext, err := sessionDataSet.Next()
 	if err != nil {
+		fmt.Errorf("QueryAggregation Next error executing statement: %w", err)
 		return 0, err
 	}
 
 	if hasNext {
+		dataSize++
 		record, err := sessionDataSet.GetRowRecord()
 		if err != nil {
+			fmt.Errorf("QueryAggregation GetRowRecord error executing statement: %w", err)
 			return 0, err
 		}
 		if record != nil && len(record.GetFields()) > 0 {
-			field := record.GetFields()[0]
-			if !field.IsNull() {
-				if field.GetDataType() == client.FLOAT {
-					return field.GetFloat32(), nil
-				} else if field.GetDataType() == client.DOUBLE {
-					return float32(field.GetFloat64()), nil
-				} else if field.GetDataType() == client.INT32 {
-					return float32(field.GetInt32()), nil
-				} else if field.GetDataType() == client.INT64 {
-					return float32(field.GetInt64()), nil
-				}
-			}
+			fmt.Println("QueryAggregation result field len:", len(record.GetFields()))
 		}
 	}
+	fmt.Println("QueryAggregation dataSize:" + strconv.Itoa(dataSize))
 
 	return 0, nil
 }
@@ -473,7 +442,7 @@ func (db *IoTDB) QueryTimeRange(ctx context.Context, start, end time.Time, limit
 
 	// 适配新的对齐时间序列路径
 	sql := fmt.Sprintf(`
-        SELECT *
+        SELECT temperature
         FROM root.**
         WHERE time >= %d AND time <= %d
         LIMIT %d
@@ -491,14 +460,7 @@ func (db *IoTDB) QueryTimeRange(ctx context.Context, start, end time.Time, limit
 	// 用于跟踪已处理的时间戳和设备
 	processed := make(map[string]bool)
 
-	for {
-		hasNext, err := sessionDataSet.Next()
-		if err != nil {
-			return nil, fmt.Errorf("QueryTimeRange error reading next record: %w", err)
-		}
-		if !hasNext {
-			break
-		}
+	for next, err := sessionDataSet.Next(); err == nil && next; next, err = sessionDataSet.Next() {
 		record, err := sessionDataSet.GetRowRecord()
 		if err != nil {
 			return nil, fmt.Errorf("error getting row record: %w", err)
@@ -530,72 +492,12 @@ func (db *IoTDB) QueryTimeRange(ctx context.Context, start, end time.Time, limit
 		}
 		processed[key] = true
 
-		// 查询该时间戳下设备的所有测量值
-		detailSql := fmt.Sprintf(`
-            SELECT temperature, humidity, pressure, voltage, current, power, rpm, status, error_code, production_count
-            FROM root.%s.%s
-            WHERE time = %d
-        `, factoryID, deviceID, timestamp)
-
-		detailDataSet, err := session.ExecuteQueryStatement(detailSql, &timeout)
-		if err != nil {
-			return nil, err
-		}
-
-		// 提取完整的传感器数据
-		var sensorData models.SensorData
-		hasDatailNext, err := detailDataSet.Next()
-		if hasDatailNext {
-			detailRecord, err := detailDataSet.GetRowRecord()
-			if err != nil {
-				detailDataSet.Close()
-				continue
-			}
-
-			sensorData = models.SensorData{
-				Timestamp: time.UnixMilli(timestamp),
-				FactoryID: factoryID,
-				DeviceID:  deviceID,
-			}
-
-			detailColumnNames := detailDataSet.GetColumnNames()
-			for i, field := range detailRecord.GetFields() {
-				if field != nil && !field.IsNull() && i < len(detailColumnNames) {
-					columnName := strings.ToLower(detailColumnNames[i])
-
-					if strings.Contains(columnName, "temperature") {
-						sensorData.Temperature = field.GetFloat32()
-					} else if strings.Contains(columnName, "humidity") {
-						sensorData.Humidity = field.GetFloat32()
-					} else if strings.Contains(columnName, "pressure") {
-						sensorData.Pressure = field.GetFloat32()
-					} else if strings.Contains(columnName, "voltage") {
-						sensorData.Voltage = field.GetFloat32()
-					} else if strings.Contains(columnName, "current") {
-						sensorData.Current = field.GetFloat32()
-					} else if strings.Contains(columnName, "power") {
-						sensorData.Power = field.GetFloat32()
-					} else if strings.Contains(columnName, "rpm") {
-						sensorData.RPM = field.GetInt64()
-					} else if strings.Contains(columnName, "status") {
-						sensorData.Status = field.GetText()
-					} else if strings.Contains(columnName, "error_code") {
-						sensorData.ErrorCode = int32(field.GetInt32())
-					} else if strings.Contains(columnName, "production_count") {
-						sensorData.ProductionCount = field.GetInt64()
-					}
-				}
-			}
-
-			data = append(data, sensorData)
-		}
-		detailDataSet.Close()
-
 		// 如果达到限制，提前退出
 		if len(data) >= limit {
 			break
 		}
 	}
+	fmt.Println("QueryTimeRange data size:", len(data))
 
 	return data, nil
 }
@@ -703,6 +605,7 @@ func (db *IoTDB) QueryGroupBy(ctx context.Context, start, end time.Time, groupBy
 		}
 	}
 
+	fmt.Println("QueryGroupBy result size:", len(result))
 	return result, nil
 }
 
@@ -713,8 +616,8 @@ func (db *IoTDB) Ping(ctx context.Context) error {
 	}
 	defer db.sessionPool.PutBack(session)
 
-	var timeout int64 = 10000 // 10秒超时
-	sessionDataSet, err := session.ExecuteQueryStatement("SHOW DATABASES", &timeout)
+	timeout := int64(10000)
+	sessionDataSet, err := session.ExecuteQueryStatement("SHOW STORAGE GROUP", &timeout)
 	if err != nil {
 		return err
 	}
@@ -1093,4 +996,19 @@ func getTextValue(field *client.Field) string {
 		}
 		return ""
 	}
+}
+
+// 错误检查函数，参考官方示例
+func checkError(status *common.TSStatus, err error) error {
+	if err != nil {
+		return err
+	}
+
+	if status != nil {
+		if err = client.VerifySuccess(status); err != nil {
+			return err
+		}
+	}
+
+	return nil
 }
