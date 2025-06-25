@@ -336,7 +336,7 @@ func (db *IoTDB) QueryAggregation(ctx context.Context, jobId string, deviceID st
 	sql := fmt.Sprintf(`
         SELECT %s(temperature) as agg_value
         FROM sensor_data
-        WHERE device_id = '%s' AND time >= %d AND time <= %d AND job_id = '%s'
+        WHERE device_id = '%s' AND time >= %d AND time <= %d AND job_id = '%s GROUP BY  date_bin(1m, time) '
     `, aggFunc, deviceID, start.UnixMilli(), end.UnixMilli(), jobId)
 
 	fmt.Printf("SQL: %s\n", sql)
@@ -369,10 +369,10 @@ func (db *IoTDB) QueryTimeRange(ctx context.Context, jobId string, start, end ti
 	defer session.Close()
 
 	sql := fmt.Sprintf(`
-        SELECT factory_id, device_id, time, temperature, humidity, pressure, voltage, current, power, rpm, status, error_code, production_count, job_id
+        SELECT AVG(temperature) 
         FROM sensor_data
         WHERE time >= %d AND time <= %d AND job_id = '%s'
-        ORDER BY time
+        GROUP BY  date_bin(1m, time)
         LIMIT %d
     `, start.UnixMilli(), end.UnixMilli(), jobId, limit)
 
@@ -449,19 +449,19 @@ func (db *IoTDB) QueryGroupBy(ctx context.Context, jobId string, start, end time
             SELECT device_id, AVG(temperature) as avg_temp
             FROM sensor_data
             WHERE time >= %d AND time <= %d AND job_id = '%s'
-            GROUP BY device_id
+            GROUP BY device_id,  date_bin(1m, time)
         `, start.UnixMilli(), end.UnixMilli(), jobId)
 	case "factory":
 		sql = fmt.Sprintf(`
             SELECT factory_id, AVG(temperature) as avg_temp
-            FROM sensor_data
+            FROM sensor_data,  date_bin(1m, time)
             WHERE time >= %d AND time <= %d AND job_id = '%s'
             GROUP BY factory_id
         `, start.UnixMilli(), end.UnixMilli(), jobId)
 	case "status":
 		sql = fmt.Sprintf(`
             SELECT status, AVG(temperature) as avg_temp
-            FROM sensor_data
+            FROM sensor_data,  date_bin(1m, time)
             WHERE time >= %d AND time <= %d AND job_id = '%s'
             GROUP BY status
         `, start.UnixMilli(), end.UnixMilli(), jobId)

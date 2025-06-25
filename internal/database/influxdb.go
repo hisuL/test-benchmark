@@ -179,8 +179,9 @@ func (db *InfluxDB) QueryTimeRange(ctx context.Context, jobId string, start, end
         from(bucket: "%s")
         |> range(start: %s, stop: %s)
         |> filter(fn: (r) => r._measurement == "sensor_data")
-		|> filter(fn: (r) => r.job_id == "%s")
+        |> filter(fn: (r) => r.job_id == "%s")
         |> filter(fn: (r) => r._field == "temperature")
+        |> aggregateWindow(every: 1m, fn: mean, createEmpty: false)
         |> limit(n: %d)
         |> pivot(rowKey:["_time"], columnKey: ["_field"], valueColumn: "_value")
     `, db.bucket, start.Format(time.RFC3339), end.Format(time.RFC3339), jobId, limit)
@@ -197,19 +198,10 @@ func (db *InfluxDB) QueryTimeRange(ctx context.Context, jobId string, start, end
 		record := result.Record()
 		dataSize += 1
 		sensorData := models.SensorData{
-			Timestamp:       record.Time(),
-			FactoryID:       getStringValue(record, "factory_id"),
-			DeviceID:        getStringValue(record, "device_id"),
-			Temperature:     getFloatValue(record, "temperature"),
-			Humidity:        getFloatValue(record, "humidity"),
-			Pressure:        getFloatValue(record, "pressure"),
-			Voltage:         getFloatValue(record, "voltage"),
-			Current:         getFloatValue(record, "current"),
-			Power:           getFloatValue(record, "power"),
-			RPM:             getIntValue(record, "rpm"),
-			Status:          getStringValue(record, "status"),
-			ErrorCode:       int32(getIntValue(record, "error_code")),
-			ProductionCount: getIntValue(record, "production_count"),
+			Timestamp:   record.Time(),
+			FactoryID:   getStringValue(record, "factory_id"),
+			DeviceID:    getStringValue(record, "device_id"),
+			Temperature: getFloatValue(record, "temperature"),
 		}
 		data = append(data, sensorData)
 	}
@@ -226,7 +218,7 @@ func (db *InfluxDB) QueryGroupBy(ctx context.Context, jobId string, start, end t
 	case "factory":
 		groupByClause = `|> group(columns: ["factory_id"])`
 	default:
-		groupByClause = fmt.Sprintf(`|> aggregateWindow(every: %s, fn: mean)`, interval.String())
+		groupByClause = fmt.Sprintf(`|> aggregateWindow(every: 1m, fn: mean)`, interval.String())
 	}
 
 	queryStr := fmt.Sprintf(`
