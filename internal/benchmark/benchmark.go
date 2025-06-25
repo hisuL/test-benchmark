@@ -3,6 +3,7 @@ package benchmark
 import (
 	"context"
 	"fmt"
+	"math/rand"
 	"runtime"
 	"sort"
 	"strings"
@@ -20,17 +21,21 @@ import (
 )
 
 type Benchmark struct {
-	config    *config.Config
-	logger    *logrus.Logger
-	databases []database.Database
-	testData  []models.SensorData
-	jobCount  int
+	config      *config.Config
+	logger      *logrus.Logger
+	databases   []database.Database
+	testData    []models.SensorData
+	jobCount    int
+	rand        *rand.Rand
+	deviceCount int
 }
 
 func NewBenchmark(cfg *config.Config, logger *logrus.Logger) *Benchmark {
 	return &Benchmark{
-		config: cfg,
-		logger: logger,
+		config:      cfg,
+		logger:      logger,
+		rand:        rand.New(rand.NewSource(time.Now().UnixNano())),
+		deviceCount: cfg.DataGeneration.DeviceCount,
 	}
 }
 
@@ -286,10 +291,13 @@ func (b *Benchmark) executeQuery(ctx context.Context, db database.Database, quer
 	}
 
 	var err error
+
 	deviceID := "device_111"
-	start := time.Date(2025, 6, 23, 11, 9, 0, 0, time.UTC)
-	end := time.Date(2025, 6, 24, 11, 9, 0, 0, time.UTC)
-	jobId := "job_110110"
+	start := time.Date(2025, 6, 23, 15, 23, 0, 0, time.UTC)
+	end := time.Date(2025, 6, 24, 15, 23, 0, 0, time.UTC)
+	allJobIndex := b.jobCount
+	//从0到allJobIndex-1生成一个随机的jobId
+	jobId := fmt.Sprintf("job_%06d", b.rand.Intn(allJobIndex)+1)
 
 	switch queryType {
 	case "point_query":

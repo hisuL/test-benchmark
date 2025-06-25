@@ -71,6 +71,7 @@ func main() {
 			cfg.Databases.IoTDB.Port,
 			cfg.Databases.IoTDB.Username,
 			cfg.Databases.IoTDB.Password,
+			"benchmark",
 		)
 		bench.AddDatabase(iotdb)
 	}

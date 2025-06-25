@@ -8,31 +8,44 @@ import (
 	"sync"
 	"time"
 
-	"github.com/apache/iotdb-client-go/client"
-	"github.com/apache/iotdb-client-go/common"
+	"github.com/apache/iotdb-client-go/v2/client"
+	"github.com/apache/iotdb-client-go/v2/common"
 	"test-benchmark/internal/models"
 )
 
 type IoTDB struct {
-	sessionPool             client.SessionPool // 改为直接使用类型而不是指针
-	host                    string
-	port                    int
-	username                string
-	password                string
-	createdTimeseries       map[string]bool
-	timeseriesCreationMutex sync.Mutex
-	hasPool                 bool // 是否有可用的sessionPool
+	sessionPool        client.TableSessionPool // 表模型会话池
+	host               string
+	port               int
+	username           string
+	password           string
+	database           string // 表模型需要指定数据库
+	tableCreated       bool
+	tableCreationMutex sync.Mutex
+	hasPool            bool
 }
 
-func NewIoTDB(host string, port int, username, password string) *IoTDB {
+func NewIoTDB(host string, port int, username, password, database string) *IoTDB {
 	return &IoTDB{
-		host:              host,
-		port:              port,
-		username:          username,
-		password:          password,
-		createdTimeseries: make(map[string]bool),
-		hasPool:           false,
+		host:         host,
+		port:         port,
+		username:     username,
+		password:     password,
+		database:     database,
+		tableCreated: false,
+		hasPool:      false,
 	}
+}
+
+func (db *IoTDB) sessionPoolConnect(ctx context.Context) {
+	config := &client.PoolConfig{
+		Host:     db.host,
+		Port:     strconv.Itoa(db.port),
+		UserName: db.username,
+		Password: db.password,
+	}
+	db.sessionPool = client.NewTableSessionPool(config, 3, 60000, 8000, false)
+
 }
 
 func (db *IoTDB) Name() string {
@@ -40,7 +53,7 @@ func (db *IoTDB) Name() string {
 }
 
 func (db *IoTDB) Connect(ctx context.Context) error {
-	// 如果sessionPool已经存在且可用，先验证连接有效性
+	db.CreateSchema(ctx)
 	if db.hasPool {
 		return nil
 	}
@@ -50,83 +63,82 @@ func (db *IoTDB) Connect(ctx context.Context) error {
 		Port:     strconv.Itoa(db.port),
 		UserName: db.username,
 		Password: db.password,
+		Database: db.database,
 	}
 
-	// 创建sessionPool - 直接赋值而不是取地址
-	db.sessionPool = client.NewSessionPool(config, 50, 60000, 30000, false)
+	// 创建表模型会话池
+	db.sessionPool = client.NewTableSessionPool(config, 50, 60000, 30000, false)
 	db.hasPool = true
 	return db.Ping(ctx)
 }
 
 func (db *IoTDB) Close() error {
-	db.sessionPool.Close()
+	if db.hasPool {
+		db.sessionPool.Close()
+	}
 	return nil
 }
 
 func (db *IoTDB) CreateSchema(ctx context.Context) error {
+	if db.hasPool {
+		fmt.Println("Session pool already exists, skipping CreateSchema")
+		return nil
+	}
+	db.sessionPoolConnect(ctx)
 	session, err := db.sessionPool.GetSession()
 	if err != nil {
 		return err
 	}
-	defer db.sessionPool.PutBack(session)
 
-	// 使用 SHOW STORAGE GROUP 而不是 SHOW DATABASES（兼容性更好）
-	dataSet, err := session.ExecuteStatement("SHOW STORAGE GROUP")
-	if err != nil {
-		return err
-	}
-	defer dataSet.Close()
+	// 检查数据库是否存在，不存在则创建
+	timeout := int64(30000)
+	fmt.Printf("SHOW DATABASES at %s:%d with user %s\n", db.host, db.port, db.username)
+	dataSet, err := session.ExecuteQueryStatement("SHOW DATABASES", &timeout)
+	if err == nil {
+		defer dataSet.Close()
 
-	existingDBs := make(map[string]bool)
-	for next, err := dataSet.Next(); err == nil && next; next, err = dataSet.Next() {
-		// 按列名获取值，更安全
-		if dbName := dataSet.GetText("storage group"); err == nil {
-			existingDBs[dbName] = true
+		existingDBs := make(map[string]bool)
+		for {
+			hasNext, err := dataSet.Next()
+			if err != nil || !hasNext {
+				break
+			}
+			dbName, err := dataSet.GetString("Database")
+			fmt.Printf("Found database: %s\n", dbName)
+			if err == nil {
+				existingDBs[dbName] = true
+			}
 		}
-	}
 
-	// 创建存储组
-	factoryPrefixes := []string{"factory_001", "factory_002", "factory_003"}
-	for _, factory := range factoryPrefixes {
-		storageGroup := fmt.Sprintf("root.%s", factory)
-		if !existingDBs[storageGroup] {
-			err = checkError(session.SetStorageGroup(storageGroup))
-			if err != nil && !strings.Contains(err.Error(), "already exists") {
+		// 如果数据库不存在，创建它
+		if !existingDBs[db.database] {
+			status, err := session.ExecuteNonQueryStatement(fmt.Sprintf("CREATE DATABASE %s", db.database))
+			fmt.Printf(fmt.Sprintf("CREATE DATABASE %s", db.database))
+			fmt.Printf("status:" + status.GetMessage() + "\n")
+			if err != nil {
+				return err
+			}
+			if err = checkError(status, err); err != nil {
 				return err
 			}
 		}
 	}
+	if err != nil {
+		fmt.Printf("SHOW DATABASES failed: %s\n", err)
+	}
 
+	fmt.Printf("USE RIGHT DATABASE at %s:%d with user %s\n", db.host, db.port, db.username)
+	checkError(session.ExecuteNonQueryStatement("use " + db.database))
+	// 创建单一的sensor_data表
+	err = db.ensureTableExists(session)
+	if err != nil {
+		return err
+	}
+	db.sessionPool.Close()
 	return nil
 }
 
 func (db *IoTDB) DropSchema(ctx context.Context) error {
-	session, err := db.sessionPool.GetSession()
-	if err != nil {
-		return err
-	}
-	defer db.sessionPool.PutBack(session)
-
-	dataSet, err := session.ExecuteStatement("SHOW STORAGE GROUP")
-	if err != nil {
-		return err
-	}
-	defer dataSet.Close()
-
-	var storageGroups []string
-	for next, err := dataSet.Next(); err == nil && next; next, err = dataSet.Next() {
-		sgName := dataSet.GetText("storage group")
-		if sgName != "" {
-			if strings.Contains(sgName, "factory_") {
-				storageGroups = append(storageGroups, sgName)
-			}
-		}
-	}
-
-	// 批量删除存储组
-	if len(storageGroups) > 0 {
-		return checkError(session.DeleteStorageGroups(storageGroups...))
-	}
 
 	return nil
 }
@@ -140,233 +152,161 @@ func (db *IoTDB) WriteBatch(ctx context.Context, data []models.SensorData) error
 	if err != nil {
 		return fmt.Errorf("failed to get session: %w", err)
 	}
-	defer db.sessionPool.PutBack(session)
+	defer session.Close()
 
-	// 按工厂和设备分组，使每个设备的数据放在一起处理
-	factoryDeviceGroups := make(map[string][]models.SensorData)
-	for _, record := range data {
-		key := fmt.Sprintf("%s.%s", record.FactoryID, record.DeviceID)
-		factoryDeviceGroups[key] = append(factoryDeviceGroups[key], record)
+	// 确保表存在
+	err = db.ensureTableExists(session)
+	if err != nil {
+		return fmt.Errorf("failed to ensure table exists: %w", err)
 	}
 
-	// 处理每个设备的批量数据
-	for deviceKey, records := range factoryDeviceGroups {
-		parts := strings.Split(deviceKey, ".")
-		if len(parts) != 2 {
-			return fmt.Errorf("invalid device key format: %s", deviceKey)
-		}
+	// 构建批量插入SQL
+	var valueStrings []string
+	for _, record := range data {
+		valueString := fmt.Sprintf(
+			"('%s', '%s', %d, %f, %f, %f, %f, %f, %f, %d, '%s', %d, %d, '%s')",
+			record.FactoryID,
+			record.DeviceID,
+			record.Timestamp.UnixMilli(),
+			record.Temperature,
+			record.Humidity,
+			record.Pressure,
+			record.Voltage,
+			record.Current,
+			record.Power,
+			record.RPM,
+			strings.ReplaceAll(record.Status, "'", "''"), // 转义单引号
+			record.ErrorCode,
+			record.ProductionCount,
+			strings.ReplaceAll(record.JobId, "'", "''"), // 转义单引号
+		)
+		valueStrings = append(valueStrings, valueString)
+	}
 
-		factoryID := parts[0]
-		deviceID := parts[1]
+	// 批量插入到单一表
+	insertSQL := fmt.Sprintf(
+		"INSERT INTO sensor_data (factory_id, device_id, time, temperature, humidity, pressure, voltage, current, power, rpm, status, error_code, production_count, job_id) VALUES %s",
+		strings.Join(valueStrings, ", "),
+	)
 
-		// 使用工厂ID作为存储组，设备ID作为设备路径
-		// 规范化工厂和设备ID，移除任何非法字符
-		safeFactoryID := strings.ReplaceAll(factoryID, "-", "_")
-		safeDeviceID := strings.ReplaceAll(deviceID, "-", "_")
-		devicePath := fmt.Sprintf("root.%s.%s", safeFactoryID, safeDeviceID)
-
-		// 准备对齐时间序列批量写入的参数
-		timestamps := make([]int64, 0, len(records))
-		measurementsList := make([][]string, 0, len(records))
-		valuesList := make([][]interface{}, 0, len(records))
-		typesList := make([][]client.TSDataType, 0, len(records))
-		deviceIds := make([]string, 0, len(records))
-
-		// 固定的测量点名称和数据类型
-		measurements := []string{
-			"temperature", "humidity", "pressure", "voltage",
-			"current", "power", "rpm", "status",
-			"error_code", "production_count", "job_id",
-		}
-
-		types := []client.TSDataType{
-			client.FLOAT, client.FLOAT, client.FLOAT, client.FLOAT,
-			client.FLOAT, client.FLOAT, client.INT64, client.TEXT,
-			client.INT32, client.INT64, client.TEXT,
-		}
-
-		// 预创建对齐时间序列（如果不存在）
-		err := db.ensureAlignedTimeseriesExists(session, devicePath, measurements, types)
-		if err != nil {
-			return fmt.Errorf("failed to ensure aligned timeseries exists: %w", err)
-		}
-
-		// 为每条记录整理数据
-		for _, record := range records {
-			deviceIds = append(deviceIds, devicePath)
-			timestamps = append(timestamps, record.Timestamp.UnixMilli())
-
-			values := []interface{}{
-				float32(record.Temperature), float32(record.Humidity),
-				float32(record.Pressure), float32(record.Voltage),
-				float32(record.Current), float32(record.Power),
-				int64(record.RPM), record.Status,
-				int32(record.ErrorCode), int64(record.ProductionCount), record.JobId,
-			}
-
-			measurementsList = append(measurementsList, measurements)
-			valuesList = append(valuesList, values)
-			typesList = append(typesList, types)
-		}
-
-		// 使用对齐时间序列方式批量插入数据
-		_, err = session.InsertAlignedRecords(deviceIds, measurementsList, typesList, valuesList, timestamps)
-		if err != nil {
-			return fmt.Errorf("failed to insert aligned records for %s: %w", deviceKey, err)
-		}
+	status, err := session.ExecuteNonQueryStatement(insertSQL)
+	if err != nil {
+		return fmt.Errorf("failed to insert data: %w", err)
+	}
+	if err = checkError(status, err); err != nil {
+		return fmt.Errorf("failed to insert data: %w", err)
 	}
 
 	return nil
 }
 
-// 确保对齐时间序列存在，不存在则创建
-func (db *IoTDB) ensureAlignedTimeseriesExists(session client.Session, devicePath string, measurements []string, types []client.TSDataType) error {
-	// 使用缓存机制避免重复创建
-	cacheKey := devicePath
-	db.timeseriesCreationMutex.Lock()
-	if _, exists := db.createdTimeseries[cacheKey]; exists {
-		db.timeseriesCreationMutex.Unlock()
+// 确保sensor_data表存在
+func (db *IoTDB) ensureTableExists(session client.ITableSession) error {
+	db.tableCreationMutex.Lock()
+	if db.tableCreated {
+		db.tableCreationMutex.Unlock()
 		return nil
 	}
-	db.timeseriesCreationMutex.Unlock()
+	db.tableCreationMutex.Unlock()
 
-	// 准备创建对齐时间序列的编码和压缩方式
-	encodings := make([]client.TSEncoding, len(measurements))
-	compressions := make([]client.TSCompressionType, len(measurements))
+	// 创建sensor_data表的SQL
+	createTableSQL := `
+        CREATE TABLE IF NOT EXISTS sensor_data (
+            factory_id STRING TAG,
+            device_id STRING TAG,
+            temperature FLOAT FIELD,
+            humidity FLOAT FIELD,
+            pressure FLOAT FIELD,
+            voltage FLOAT FIELD,
+            current FLOAT FIELD,
+            power FLOAT FIELD,
+            rpm INT64 FIELD,
+            status STRING FIELD,
+            error_code INT32 FIELD,
+            production_count INT64 FIELD,
+            job_id STRING FIELD
+        )`
 
-	for i, dataType := range types {
-		// 根据数据类型选择最佳编码
-		switch dataType {
-		case client.FLOAT:
-			encodings[i] = client.GORILLA
-		case client.INT32, client.INT64:
-			encodings[i] = client.TS_2DIFF
-		case client.TEXT:
-			encodings[i] = client.PLAIN
-		default:
-			encodings[i] = client.PLAIN
-		}
-		// 使用LZ4压缩
-		compressions[i] = client.LZ4
+	status, err := session.ExecuteNonQueryStatement(createTableSQL)
+	if err != nil {
+		return err
 	}
-
-	// 创建对齐时间序列
-	_, err := session.CreateAlignedTimeseries(
-		devicePath,
-		measurements,
-		types,
-		encodings,
-		compressions,
-		nil)
-
-	// 忽略"已存在"错误
-	if err != nil && !strings.Contains(err.Error(), "already exist") {
+	if err = checkError(status, err); err != nil {
 		return err
 	}
 
-	// 记录已创建的时间序列
-	db.timeseriesCreationMutex.Lock()
-	if db.createdTimeseries == nil {
-		db.createdTimeseries = make(map[string]bool)
-	}
-	db.createdTimeseries[cacheKey] = true
-	db.timeseriesCreationMutex.Unlock()
+	// 记录表已创建
+	db.tableCreationMutex.Lock()
+	db.tableCreated = true
+	db.tableCreationMutex.Unlock()
 
 	return nil
 }
 
-// 修改后的查询方法 - 适配新的对齐时间序列结构
 func (db *IoTDB) QueryByDeviceAndTimeRange(ctx context.Context, jobId string, deviceID string, start, end time.Time) ([]models.SensorData, error) {
 	session, err := db.sessionPool.GetSession()
 	if err != nil {
 		return nil, err
 	}
-	defer db.sessionPool.PutBack(session)
+	defer session.Close()
 
-	// 适配新的路径结构: root.{factory_id}.{device_id}
-	// 由于设备ID可能在多个工厂中，我们需要查询所有工厂
+	// 查询单一表
 	sql := fmt.Sprintf(`
-        SELECT temperature, humidity, pressure, voltage, current, power, rpm, status, error_code, production_count
-        FROM root.*.%s
-        WHERE time >= %d AND time <= %d AND job_id = '%s'
+        SELECT factory_id, device_id, time, temperature, humidity, pressure, voltage, current, power, rpm, status, error_code, production_count, job_id
+        FROM sensor_data
+        WHERE device_id = '%s' AND time >= %d AND time <= %d AND job_id = '%s'
         ORDER BY time
     `, deviceID, start.UnixMilli(), end.UnixMilli(), jobId)
 
-	fmt.Printf(sql)
-	var timeout int64 = 60000 // 60秒超时
-	sessionDataSet, err := session.ExecuteQueryStatement(sql, &timeout)
+	fmt.Printf("SQL: %s\n", sql)
+	timeout := int64(60000)
+	dataSet, err := session.ExecuteQueryStatement(sql, &timeout)
 	if err != nil {
 		return nil, err
 	}
-	defer sessionDataSet.Close()
+	defer dataSet.Close()
 
 	var data []models.SensorData
-
 	for {
-		hasNext, err := sessionDataSet.Next()
+		hasNext, err := dataSet.Next()
 		if err != nil {
-			return nil, fmt.Errorf("QueryByDeviceAndTimeRange error reading next record: %w", err)
+			return nil, fmt.Errorf("error reading next record: %w", err)
 		}
 		if !hasNext {
 			break
 		}
-		record, err := sessionDataSet.GetRowRecord()
-		if err != nil {
-			return nil, fmt.Errorf("error getting row record: %w", err)
-		}
-		if record == nil {
-			continue
-		}
 
-		// 从路径中提取工厂ID
-		columnNames := sessionDataSet.GetColumnNames()
-		factoryID := ""
-		if len(columnNames) > 0 {
-			pathParts := strings.Split(columnNames[0], ".")
-			if len(pathParts) >= 2 {
-				factoryID = pathParts[1] // root.factory_id.device_id.measurement
-			}
-		}
+		factoryID, _ := dataSet.GetString("factory_id")
+		deviceIDResult, _ := dataSet.GetString("device_id")
+		timestamp, _ := dataSet.GetLong("ts")
+		temperature, _ := dataSet.GetFloat("temperature")
+		humidity, _ := dataSet.GetFloat("humidity")
+		pressure, _ := dataSet.GetFloat("pressure")
+		voltage, _ := dataSet.GetFloat("voltage")
+		current, _ := dataSet.GetFloat("current")
+		power, _ := dataSet.GetFloat("power")
+		rpm, _ := dataSet.GetLong("rpm")
+		status, _ := dataSet.GetString("status")
+		errorCode, _ := dataSet.GetInt("error_code")
+		productionCount, _ := dataSet.GetLong("production_count")
+		jobIdResult, _ := dataSet.GetString("job_id")
 
 		sensorData := models.SensorData{
-			Timestamp: time.UnixMilli(record.GetTimestamp()),
-			FactoryID: factoryID,
-			DeviceID:  deviceID,
+			Timestamp:       time.UnixMilli(timestamp),
+			FactoryID:       factoryID,
+			DeviceID:        deviceIDResult,
+			Temperature:     float32(temperature),
+			Humidity:        float32(humidity),
+			Pressure:        float32(pressure),
+			Voltage:         float32(voltage),
+			Current:         float32(current),
+			Power:           float32(power),
+			RPM:             rpm,
+			Status:          status,
+			ErrorCode:       int32(errorCode),
+			ProductionCount: productionCount,
+			JobId:           jobIdResult,
 		}
-
-		// 从记录中提取传感器数据
-		for i, field := range record.GetFields() {
-			if field != nil && !field.IsNull() {
-				columnName := ""
-				if i < len(columnNames) {
-					columnName = strings.ToLower(columnNames[i])
-				}
-
-				// 根据列名设置对应字段
-				if strings.Contains(columnName, "temperature") {
-					sensorData.Temperature = field.GetFloat32()
-				} else if strings.Contains(columnName, "humidity") {
-					sensorData.Humidity = field.GetFloat32()
-				} else if strings.Contains(columnName, "pressure") {
-					sensorData.Pressure = field.GetFloat32()
-				} else if strings.Contains(columnName, "voltage") {
-					sensorData.Voltage = field.GetFloat32()
-				} else if strings.Contains(columnName, "current") {
-					sensorData.Current = field.GetFloat32()
-				} else if strings.Contains(columnName, "power") {
-					sensorData.Power = field.GetFloat32()
-				} else if strings.Contains(columnName, "rpm") {
-					sensorData.RPM = field.GetInt64()
-				} else if strings.Contains(columnName, "status") {
-					sensorData.Status = field.GetText()
-				} else if strings.Contains(columnName, "error_code") {
-					sensorData.ErrorCode = int32(field.GetInt32())
-				} else if strings.Contains(columnName, "production_count") {
-					sensorData.ProductionCount = field.GetInt64()
-				}
-			}
-		}
-
 		data = append(data, sensorData)
 	}
 
@@ -379,57 +319,46 @@ func (db *IoTDB) QueryAggregation(ctx context.Context, jobId string, deviceID st
 	if err != nil {
 		return 0, err
 	}
-	defer db.sessionPool.PutBack(session)
+	defer session.Close()
 
 	var aggFunc string
 	switch aggType {
 	case "avg":
-		aggFunc = "avg"
+		aggFunc = "AVG"
 	case "max":
-		aggFunc = "max_value"
+		aggFunc = "MAX"
 	case "min":
-		aggFunc = "min_value"
+		aggFunc = "MIN"
 	default:
-		aggFunc = "avg"
+		aggFunc = "AVG"
 	}
 
-	// 适配新的对齐时间序列路径
 	sql := fmt.Sprintf(`
-        SELECT %s(temperature)
-        FROM root.*.%s
-        WHERE time >= %d AND time <= %d AND job_id = '%s' GROUP BY ([%d, %d), 1m)
-    `, aggFunc, deviceID, start.UnixMilli(), end.UnixMilli(), jobId, start.UnixMilli(), end.UnixMilli())
+        SELECT %s(temperature) as agg_value
+        FROM sensor_data
+        WHERE device_id = '%s' AND time >= %d AND time <= %d AND job_id = '%s'
+    `, aggFunc, deviceID, start.UnixMilli(), end.UnixMilli(), jobId)
 
-	fmt.Printf(sql)
-	var timeout int64 = 60000
-	sessionDataSet, err := session.ExecuteQueryStatement(sql, &timeout)
+	fmt.Printf("SQL: %s\n", sql)
+	timeout := int64(60000)
+	dataSet, err := session.ExecuteQueryStatement(sql, &timeout)
 	if err != nil {
-		fmt.Errorf("QueryAggregation ExecuteQueryStatement error executing statement: %w", err)
 		return 0, err
 	}
-	defer sessionDataSet.Close()
+	defer dataSet.Close()
 
-	dataSize := 0
-	hasNext, err := sessionDataSet.Next()
+	hasNext, err := dataSet.Next()
+	if err != nil || !hasNext {
+		return 0, fmt.Errorf("no aggregation result found")
+	}
+
+	aggValue, err := dataSet.GetFloat("agg_value")
 	if err != nil {
-		fmt.Errorf("QueryAggregation Next error executing statement: %w", err)
 		return 0, err
 	}
 
-	if hasNext {
-		dataSize++
-		record, err := sessionDataSet.GetRowRecord()
-		if err != nil {
-			fmt.Errorf("QueryAggregation GetRowRecord error executing statement: %w", err)
-			return 0, err
-		}
-		if record != nil && len(record.GetFields()) > 0 {
-			fmt.Println("QueryAggregation result field len:", len(record.GetFields()))
-		}
-	}
-	fmt.Println("QueryAggregation dataSize:" + strconv.Itoa(dataSize))
-
-	return 0, nil
+	fmt.Printf("QueryAggregation result: %f\n", aggValue)
+	return float32(aggValue), nil
 }
 
 func (db *IoTDB) QueryTimeRange(ctx context.Context, jobId string, start, end time.Time, limit int) ([]models.SensorData, error) {
@@ -437,67 +366,70 @@ func (db *IoTDB) QueryTimeRange(ctx context.Context, jobId string, start, end ti
 	if err != nil {
 		return nil, err
 	}
-	defer db.sessionPool.PutBack(session)
+	defer session.Close()
 
-	// 适配新的对齐时间序列路径
 	sql := fmt.Sprintf(`
-        SELECT temperature
-        FROM root.**
+        SELECT factory_id, device_id, time, temperature, humidity, pressure, voltage, current, power, rpm, status, error_code, production_count, job_id
+        FROM sensor_data
         WHERE time >= %d AND time <= %d AND job_id = '%s'
+        ORDER BY time
         LIMIT %d
     `, start.UnixMilli(), end.UnixMilli(), jobId, limit)
 
-	fmt.Printf(sql)
-	var timeout int64 = 60000
-	sessionDataSet, err := session.ExecuteQueryStatement(sql, &timeout)
+	fmt.Printf("SQL: %s\n", sql)
+	timeout := int64(60000)
+	dataSet, err := session.ExecuteQueryStatement(sql, &timeout)
 	if err != nil {
 		return nil, err
 	}
-	defer sessionDataSet.Close()
+	defer dataSet.Close()
 
 	var data []models.SensorData
-	// 用于跟踪已处理的时间戳和设备
-	processed := make(map[string]bool)
-
-	for next, err := sessionDataSet.Next(); err == nil && next; next, err = sessionDataSet.Next() {
-		record, err := sessionDataSet.GetRowRecord()
+	for {
+		hasNext, err := dataSet.Next()
 		if err != nil {
-			return nil, fmt.Errorf("error getting row record: %w", err)
+			return nil, fmt.Errorf("error reading next record: %w", err)
 		}
-		if record == nil {
-			continue
-		}
-
-		// 分析第一个列名来获取工厂ID和设备ID
-		columnNames := sessionDataSet.GetColumnNames()
-		if len(columnNames) == 0 {
-			continue
-		}
-
-		// 从路径中提取工厂ID和设备ID
-		pathParts := strings.Split(columnNames[0], ".")
-		if len(pathParts) < 4 { // root.factoryID.deviceID.measurement
-			continue
-		}
-
-		factoryID := pathParts[1]
-		deviceID := pathParts[2]
-		timestamp := record.GetTimestamp()
-
-		// 跳过已处理过的时间戳+设备组合
-		key := fmt.Sprintf("%d-%s-%s", timestamp, factoryID, deviceID)
-		if processed[key] {
-			continue
-		}
-		processed[key] = true
-
-		// 如果达到限制，提前退出
-		if len(data) >= limit {
+		if !hasNext {
 			break
 		}
-	}
-	fmt.Println("QueryTimeRange data size:", len(data))
 
+		factoryID, _ := dataSet.GetString("factory_id")
+		deviceID, _ := dataSet.GetString("device_id")
+		timestamp, _ := dataSet.GetLong("ts")
+		temperature, _ := dataSet.GetFloat("temperature")
+		humidity, _ := dataSet.GetFloat("humidity")
+		pressure, _ := dataSet.GetFloat("pressure")
+		voltage, _ := dataSet.GetFloat("voltage")
+		current, _ := dataSet.GetFloat("current")
+		power, _ := dataSet.GetFloat("power")
+		rpm, _ := dataSet.GetLong("rpm")
+		status, _ := dataSet.GetString("status")
+		errorCode, _ := dataSet.GetInt("error_code")
+		productionCount, _ := dataSet.GetLong("production_count")
+		jobIdResult, _ := dataSet.GetString("job_id")
+
+		sensorData := models.SensorData{
+			Timestamp:       time.UnixMilli(timestamp),
+			FactoryID:       factoryID,
+			DeviceID:        deviceID,
+			Temperature:     float32(temperature),
+			Humidity:        float32(humidity),
+			Pressure:        float32(pressure),
+			Voltage:         float32(voltage),
+			Current:         float32(current),
+			Power:           float32(power),
+			RPM:             rpm,
+			Status:          status,
+			ErrorCode:       int32(errorCode),
+			ProductionCount: productionCount,
+			JobId:           jobIdResult,
+		}
+
+		data = append(data, sensorData)
+	}
+
+	fmt.Println("QueryTimeRange data size:", len(data))
 	return data, nil
 }
 
@@ -506,102 +438,84 @@ func (db *IoTDB) QueryGroupBy(ctx context.Context, jobId string, start, end time
 	if err != nil {
 		return nil, err
 	}
-	defer db.sessionPool.PutBack(session)
+	defer session.Close()
 
 	var sql string
+	timeout := int64(60000)
 
 	switch groupBy {
-	case "status":
-		// 按设备分组
+	case "device":
 		sql = fmt.Sprintf(`
-            SELECT avg(temperature) AS avg_temp 
-            FROM root.**
-            WHERE time >= %d AND time <= %d and job_id = '%s'
-            GROUP BY LEVEL=3
+            SELECT device_id, AVG(temperature) as avg_temp
+            FROM sensor_data
+            WHERE time >= %d AND time <= %d AND job_id = '%s'
+            GROUP BY device_id
         `, start.UnixMilli(), end.UnixMilli(), jobId)
 	case "factory":
-		// 按工厂分组
 		sql = fmt.Sprintf(`
-            SELECT avg(temperature) AS avg_temp 
-            FROM root.**
-            WHERE time >= %d AND time <= %d and job_id = '%s'
-            GROUP BY LEVEL=2
+            SELECT factory_id, AVG(temperature) as avg_temp
+            FROM sensor_data
+            WHERE time >= %d AND time <= %d AND job_id = '%s'
+            GROUP BY factory_id
+        `, start.UnixMilli(), end.UnixMilli(), jobId)
+	case "status":
+		sql = fmt.Sprintf(`
+            SELECT status, AVG(temperature) as avg_temp
+            FROM sensor_data
+            WHERE time >= %d AND time <= %d AND job_id = '%s'
+            GROUP BY status
         `, start.UnixMilli(), end.UnixMilli(), jobId)
 	case "time":
-		// 按时间间隔分组
-		intervalStr := formatInterval(interval)
+		// 表模型中的时间分组需要使用不同的语法
+		intervalMs := interval.Milliseconds()
 		sql = fmt.Sprintf(`
-            SELECT avg(temperature) AS avg_temp 
-            FROM root.**
+            SELECT (time / %d) * %d as time_bucket, AVG(temperature) as avg_temp
+            FROM sensor_data
             WHERE time >= %d AND time <= %d AND job_id = '%s'
-            GROUP BY ([%d, %d), %s)
-        `, start.UnixMilli(), end.UnixMilli(), jobId, start.UnixMilli(), end.UnixMilli(), intervalStr)
+            GROUP BY time_bucket
+            ORDER BY time_bucket
+        `, intervalMs, intervalMs, start.UnixMilli(), end.UnixMilli(), jobId)
 	default:
 		return nil, fmt.Errorf("unsupported groupBy type: %s", groupBy)
 	}
 
-	var timeout int64 = 60000
-	fmt.Printf(sql)
-	sessionDataSet, err := session.ExecuteQueryStatement(sql, &timeout)
+	fmt.Printf("SQL: %s\n", sql)
+	dataSet, err := session.ExecuteQueryStatement(sql, &timeout)
 	if err != nil {
 		return nil, err
 	}
-	defer sessionDataSet.Close()
+	defer dataSet.Close()
 
 	result := make(map[string]float32)
 	for {
-		hasNext, err := sessionDataSet.Next()
+		hasNext, err := dataSet.Next()
 		if err != nil {
-			return nil, fmt.Errorf("QueryGroupBy error reading next record: %w", err)
+			return nil, fmt.Errorf("error reading next record: %w", err)
 		}
 		if !hasNext {
 			break
 		}
-		record, err := sessionDataSet.GetRowRecord()
-		if err != nil {
-			return nil, fmt.Errorf("error getting row record: %w", err)
-		}
-		if record == nil {
-			continue
-		}
 
-		// 确定结果键名
 		var key string
-		if groupBy == "time" {
-			// 对于按时间分组，使用时间戳作为键
-			key = time.UnixMilli(record.GetTimestamp()).Format(time.RFC3339)
-		} else {
-			// 对于按设备或工厂分组，使用列名中的设备或工厂ID
-			columnNames := sessionDataSet.GetColumnNames()
-			if len(columnNames) > 0 {
-				pathParts := strings.Split(columnNames[0], ".")
-				if groupBy == "device" && len(pathParts) >= 3 {
-					key = pathParts[2] // 设备ID
-				} else if groupBy == "factory" && len(pathParts) >= 2 {
-					key = pathParts[1] // 工厂ID
-				} else {
-					key = columnNames[0]
-				}
-			} else {
-				key = fmt.Sprintf("unknown_%d", len(result))
-			}
+		var avgTemp float32
+
+		switch groupBy {
+		case "device":
+			key, _ = dataSet.GetString("device_id")
+			avgTemp, _ = dataSet.GetFloat("avg_temp")
+		case "factory":
+			key, _ = dataSet.GetString("factory_id")
+			avgTemp, _ = dataSet.GetFloat("avg_temp")
+		case "status":
+			key, _ = dataSet.GetString("status")
+			avgTemp, _ = dataSet.GetFloat("avg_temp")
+		case "time":
+			timeBucket, _ := dataSet.GetLong("time_bucket")
+			key = time.UnixMilli(timeBucket).Format(time.RFC3339)
+			avgTemp, _ = dataSet.GetFloat("avg_temp")
 		}
 
-		// 获取聚合值
-		if len(record.GetFields()) > 0 {
-			field := record.GetFields()[0]
-			if !field.IsNull() {
-				if field.GetDataType() == client.FLOAT {
-					result[key] = field.GetFloat32()
-				} else if field.GetDataType() == client.DOUBLE {
-					result[key] = float32(field.GetFloat64())
-				} else if field.GetDataType() == client.INT32 {
-					result[key] = float32(field.GetInt32())
-				} else if field.GetDataType() == client.INT64 {
-					result[key] = float32(field.GetInt64())
-				}
-			}
-		}
+		result[key] = float32(avgTemp)
 	}
 
 	fmt.Println("QueryGroupBy result size:", len(result))
@@ -613,18 +527,33 @@ func (db *IoTDB) Ping(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	defer db.sessionPool.PutBack(session)
+	defer session.Close()
 
 	timeout := int64(10000)
-	sessionDataSet, err := session.ExecuteQueryStatement("SHOW STORAGE GROUP", &timeout)
+	dataSet, err := session.ExecuteQueryStatement("SHOW DATABASES", &timeout)
 	if err != nil {
 		return err
 	}
-	defer sessionDataSet.Close()
+	defer dataSet.Close()
 	return nil
 }
 
-// 格式化时间间隔，用于GROUP BY子句
+// 错误检查函数
+func checkError(status *common.TSStatus, err error) error {
+	if err != nil {
+		return err
+	}
+
+	if status != nil {
+		if err = client.VerifySuccess(status); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// 辅助函数：格式化时间间隔（如果需要的话）
 func formatInterval(interval time.Duration) string {
 	if interval >= 24*time.Hour {
 		days := int(interval.Hours() / 24)
@@ -642,127 +571,4 @@ func formatInterval(interval time.Duration) string {
 		milliseconds := int(interval.Milliseconds())
 		return fmt.Sprintf("%dms", milliseconds)
 	}
-}
-
-// 从路径中解析设备信息
-func parseDeviceInfo(columnName string) (factoryID, deviceID string) {
-	parts := strings.Split(columnName, ".")
-	if len(parts) >= 3 {
-		factoryID = parts[1] // root.factory_id.device_id.measurement
-		deviceID = parts[2]
-	}
-	return
-}
-
-// 提取分组键
-func extractGroupKey(columnName, groupBy string) string {
-	parts := strings.Split(columnName, ".")
-
-	switch groupBy {
-	case "factory":
-		if len(parts) >= 2 {
-			return parts[1] // root.factory_id.device_id.measurement
-		}
-	case "device":
-		if len(parts) >= 3 {
-			return parts[2] // root.factory_id.device_id.measurement
-		}
-	}
-
-	return columnName
-}
-
-// 从记录中获取浮点值
-func getIotFloatValue(field *client.Field) float32 {
-	if field == nil || field.IsNull() {
-		return 0
-	}
-
-	switch field.GetDataType() {
-	case client.FLOAT:
-		return field.GetFloat32()
-	case client.DOUBLE:
-		return float32(field.GetFloat64())
-	case client.INT32:
-		return float32(field.GetInt32())
-	case client.INT64:
-		return float32(field.GetInt64())
-	default:
-		// 尝试文本解析
-		if text := field.GetText(); text != "" {
-			if val, err := strconv.ParseFloat(text, 32); err == nil {
-				return float32(val)
-			}
-		}
-		return 0
-	}
-}
-
-// 从记录中获取整数值
-func getInt64Value(field *client.Field) int64 {
-	if field == nil || field.IsNull() {
-		return 0
-	}
-
-	switch field.GetDataType() {
-	case client.INT64:
-		return field.GetInt64()
-	case client.INT32:
-		return int64(field.GetInt32())
-	case client.FLOAT:
-		return int64(field.GetFloat32())
-	case client.DOUBLE:
-		return int64(field.GetFloat64())
-	default:
-		// 尝试文本解析
-		if text := field.GetText(); text != "" {
-			if val, err := strconv.ParseInt(text, 10, 64); err == nil {
-				return val
-			}
-		}
-		return 0
-	}
-}
-
-// 从记录中获取文本值
-func getTextValue(field *client.Field) string {
-	if field == nil || field.IsNull() {
-		return ""
-	}
-
-	if field.GetDataType() == client.TEXT {
-		return field.GetText()
-	}
-
-	// 尝试将其他类型转换为文本
-	switch field.GetDataType() {
-	case client.FLOAT:
-		return fmt.Sprintf("%f", field.GetFloat32())
-	case client.DOUBLE:
-		return fmt.Sprintf("%f", field.GetFloat64())
-	case client.INT32:
-		return strconv.Itoa(int(field.GetInt32()))
-	case client.INT64:
-		return strconv.FormatInt(field.GetInt64(), 10)
-	default:
-		if val := field.GetValue(); val != nil {
-			return fmt.Sprintf("%v", val)
-		}
-		return ""
-	}
-}
-
-// 错误检查函数，参考官方示例
-func checkError(status *common.TSStatus, err error) error {
-	if err != nil {
-		return err
-	}
-
-	if status != nil {
-		if err = client.VerifySuccess(status); err != nil {
-			return err
-		}
-	}
-
-	return nil
 }

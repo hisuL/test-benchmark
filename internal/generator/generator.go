@@ -23,45 +23,56 @@ func NewDataGenerator(cfg *config.DataGenConfig) *DataGenerator {
 
 func (g *DataGenerator) GenerateData() ([]models.SensorData, error) {
 	var data []models.SensorData
+	now := time.Date(2025, 6, 24, 15, 23, 0, 0, time.UTC)
+	startTime := now.Add(-time.Duration(g.config.TimeSpanHours) * time.Hour)
+	endTime := now
 
-	startTime := time.Now().Add(-time.Duration(g.config.TimeSpanHours) * time.Hour)
-	endTime := time.Now()
-
-	// Calculate samples per device
+	// 计算每台设备的采样数
 	totalDuration := endTime.Sub(startTime)
 	samplingInterval := time.Duration(g.config.SamplingRateMs) * time.Millisecond
 	samplesPerDevice := int64(totalDuration / samplingInterval)
 
-	// Adjust device count if needed to meet total records requirement
-	if samplesPerDevice*int64(g.config.DeviceCount) != g.config.TotalRecords {
-		g.config.DeviceCount = int(g.config.TotalRecords / samplesPerDevice)
-		if g.config.DeviceCount == 0 {
-			g.config.DeviceCount = 1
-		}
+	if samplesPerDevice == 0 {
+		return nil, fmt.Errorf("sampling interval is too large for the given timespan")
 	}
 
-	devicesPerFactory := g.config.DeviceCount / g.config.FactoryCount
-	if devicesPerFactory == 0 {
-		devicesPerFactory = 1
+	// 确保设备数量和工厂分布合理
+	if g.config.FactoryCount == 0 || g.config.DeviceCount == 0 {
+		return nil, fmt.Errorf("invalid configuration: FactoryCount and DeviceCount must be greater than 0")
+	}
+
+	// 预分配切片大小
+	data = make([]models.SensorData, 0, g.config.TotalRecords)
+
+	// 预生成 Job ID 池
+	jobIdPool := make([]string, g.config.JobCount)
+	for i := 0; i < g.config.JobCount; i++ {
+		jobIdPool[i] = fmt.Sprintf("job_%06d", i+1)
 	}
 
 	recordCount := int64(0)
 
-	allJobIndex := g.config.JobCount
+	// 数据生成
 	for factoryId := 1; factoryId <= g.config.FactoryCount; factoryId++ {
-		for deviceId := 1; deviceId <= devicesPerFactory && recordCount < g.config.TotalRecords; deviceId++ {
-			factoryName := fmt.Sprintf("factory_%03d", factoryId)
-			deviceName := fmt.Sprintf("device_%03d", deviceId)
+		factoryName := fmt.Sprintf("factory_%03d", factoryId)
 
-			currentTime := startTime
-			for currentTime.Before(endTime) && recordCount < g.config.TotalRecords {
-				// 在allJobIndex 随机生成一个Job ID
-				jobId := fmt.Sprintf("job_%03d", g.rand.Intn(allJobIndex)+1)
+		for recordCount < g.config.TotalRecords {
+			// 随机生成 deviceId，范围是 1 到 g.config.DeviceCount（对应当前工厂）
+			randomDeviceId := g.rand.Intn(g.config.DeviceCount) + 1
+			deviceName := fmt.Sprintf("device_%03d", randomDeviceId) // 随机设备名
+
+			// 遍历时间
+			for sample := int64(0); sample < samplesPerDevice && recordCount < g.config.TotalRecords; sample++ {
+				currentTime := startTime.Add(time.Duration(sample) * samplingInterval)
+				jobId := jobIdPool[g.rand.Intn(len(jobIdPool))] // 从 Job ID 池随机选取
 				record := g.generateSensorRecord(factoryName, jobId, deviceName, currentTime)
-				data = append(data, record)
 
-				currentTime = currentTime.Add(samplingInterval)
+				data = append(data, record)
 				recordCount++
+			}
+			// 防止超出总记录数
+			if recordCount >= g.config.TotalRecords {
+				break
 			}
 		}
 	}
@@ -139,55 +150,4 @@ func (g *DataGenerator) generateErrorCode(status string) int32 {
 		return int32(2000 + g.rand.Intn(10)) // Maintenance codes 2000-2009
 	}
 	return 0 // No error
-}
-
-func (g *DataGenerator) GenerateBatches(batchSize int) (<-chan []models.SensorData, error) {
-	ch := make(chan []models.SensorData, 10)
-
-	go func() {
-		defer close(ch)
-
-		startTime := time.Now().Add(-time.Duration(g.config.TimeSpanHours) * time.Hour)
-		endTime := time.Now()
-		samplingInterval := time.Duration(g.config.SamplingRateMs) * time.Millisecond
-
-		devicesPerFactory := g.config.DeviceCount / g.config.FactoryCount
-		if devicesPerFactory == 0 {
-			devicesPerFactory = 1
-		}
-
-		var batch []models.SensorData
-		recordCount := int64(0)
-
-		for factoryId := 1; factoryId <= g.config.FactoryCount; factoryId++ {
-			for deviceId := 1; deviceId <= devicesPerFactory && recordCount < g.config.TotalRecords; deviceId++ {
-				factoryName := fmt.Sprintf("factory_%03d", factoryId)
-				deviceName := fmt.Sprintf("device_%03d", deviceId)
-
-				currentTime := startTime
-				for currentTime.Before(endTime) && recordCount < g.config.TotalRecords {
-					// 在allJobIndex 随机生成一个Job ID
-					allJobIndex := g.config.JobCount
-					jobId := fmt.Sprintf("job_%03d", g.rand.Intn(allJobIndex)+1)
-					record := g.generateSensorRecord(factoryName, jobId, deviceName, currentTime)
-					batch = append(batch, record)
-					recordCount++
-
-					if len(batch) >= batchSize {
-						ch <- batch
-						batch = nil
-					}
-
-					currentTime = currentTime.Add(samplingInterval)
-				}
-			}
-		}
-
-		// Send remaining batch
-		if len(batch) > 0 {
-			ch <- batch
-		}
-	}()
-
-	return ch, nil
 }

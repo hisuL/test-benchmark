@@ -3,7 +3,7 @@ module test-benchmark
 go 1.24
 
 require (
-	github.com/apache/iotdb-client-go v1.3.4
+	github.com/apache/iotdb-client-go/v2 v2.0.3-1
 	github.com/influxdata/influxdb-client-go/v2 v2.14.0
 	github.com/montanaflynn/stats v0.7.1
 	github.com/sirupsen/logrus v1.9.3
