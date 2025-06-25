@@ -213,10 +213,11 @@ func (db *TDengine) QueryAggregation(ctx context.Context, jobId string, deviceID
 	}
 
 	query := fmt.Sprintf(`
-        USE %s;
-        SELECT %s FROM sensor_data 
-        WHERE device_id = '%s' AND ts >= '%s' AND ts <= '%s' AND job_id = '%s'
-    `, db.database, aggFunc, deviceID, start.Format("2006-01-02 15:04:05"), end.Format("2006-01-02 15:04:05"), jobId)
+            USE %s;
+            SELECT   %s FROM sensor_data 
+            WHERE device_id = '%s' AND ts >= '%s' AND ts <= '%s' AND job_id = '%s'
+            INTERVAL(1m);
+        `, db.database, aggFunc, deviceID, start.Format("2006-01-02 15:04:05"), end.Format("2006-01-02 15:04:05"), jobId)
 
 	fmt.Printf(query)
 	var result float32
@@ -227,9 +228,10 @@ func (db *TDengine) QueryAggregation(ctx context.Context, jobId string, deviceID
 func (db *TDengine) QueryTimeRange(ctx context.Context, jobId string, start, end time.Time, limit int) ([]models.SensorData, error) {
 	query := fmt.Sprintf(`
         USE %s;
-        SELECT ts, temperature, humidity, pressure, voltage, current, power, rpm, status, error_code, production_count, factory_id, device_id
+        SELECT avg(temperature) 
         FROM sensor_data 
         WHERE ts >= '%s' AND ts <= '%s' AND job_id = '%s'
+		INTERVAL(1m)
         ORDER BY ts
         LIMIT %d
     `, db.database, start.Format("2006-01-02 15:04:05"), end.Format("2006-01-02 15:04:05"), jobId, limit)
@@ -245,14 +247,6 @@ func (db *TDengine) QueryTimeRange(ctx context.Context, jobId string, start, end
 	for rows.Next() {
 		var record models.SensorData
 		var ts string
-
-		err := rows.Scan(&ts, &record.Temperature, &record.Humidity, &record.Pressure,
-			&record.Voltage, &record.Current, &record.Power, &record.RPM,
-			&record.Status, &record.ErrorCode, &record.ProductionCount,
-			&record.FactoryID, &record.DeviceID)
-		if err != nil {
-			return nil, err
-		}
 
 		record.Timestamp, _ = time.Parse("2006-01-02 15:04:05", ts)
 		data = append(data, record)
@@ -270,14 +264,16 @@ func (db *TDengine) QueryGroupBy(ctx context.Context, jobId string, start, end t
             USE %s;
             SELECT device_id, AVG(temperature) FROM sensor_data 
             WHERE ts >= '%s' AND ts <= '%s' AND job_id = '%s'
-            GROUP BY device_id
+            PARTITION  BY device_id 
+			INTERVAL(1m)
         `, db.database, start.Format("2006-01-02 15:04:05"), end.Format("2006-01-02 15:04:05"), jobId)
 	case "factory":
 		query = fmt.Sprintf(`
             USE %s;
             SELECT factory_id, AVG(temperature) FROM sensor_data 
             WHERE ts >= '%s' AND ts <= '%s' AND job_id = '%s'
-            GROUP BY factory_id
+            PARTITION  BY factory_id
+			INTERVAL(1m)
         `, db.database, start.Format("2006-01-02 15:04:05"), end.Format("2006-01-02 15:04:05"), jobId)
 	default:
 		// Time-based grouping
