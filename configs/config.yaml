@@ -28,7 +28,7 @@ databases:
 
 benchmark:
   ## concurrency_levels: [1, 5, 20, 50, 100]
-  concurrency_levels: [1]
+  concurrency_levels: [50]
   query_duration_seconds: 60
   warmup_duration_seconds: 10
   report_interval:

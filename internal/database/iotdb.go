@@ -454,16 +454,16 @@ func (db *IoTDB) QueryGroupBy(ctx context.Context, jobId string, start, end time
 	case "factory":
 		sql = fmt.Sprintf(`
             SELECT factory_id, AVG(temperature) as avg_temp
-            FROM sensor_data,  date_bin(1m, time)
+            FROM sensor_data
             WHERE time >= %d AND time <= %d AND job_id = '%s'
-            GROUP BY factory_id
+            GROUP BY factory_id,  date_bin(1m, time)
         `, start.UnixMilli(), end.UnixMilli(), jobId)
 	case "status":
 		sql = fmt.Sprintf(`
             SELECT status, AVG(temperature) as avg_temp
-            FROM sensor_data,  date_bin(1m, time)
+            FROM sensor_data 
             WHERE time >= %d AND time <= %d AND job_id = '%s'
-            GROUP BY status
+            GROUP BY status,  date_bin(1m, time)
         `, start.UnixMilli(), end.UnixMilli(), jobId)
 	case "time":
 		// 表模型中的时间分组需要使用不同的语法
