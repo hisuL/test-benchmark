@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net"
+	"net/http"
 	"os"
 	"strings"
 	"test-benchmark/internal/models"
@@ -34,7 +36,30 @@ type TDengineResponse struct {
 
 func NewTDengineDB(host string, port int, username string, password string, db string) *TDengineDB {
 	client := resty.New()
+
+	// 设置超时时间
 	client.SetTimeout(30 * time.Second)
+
+	// 配置连接池和复用
+	client.SetTransport(&http.Transport{
+		MaxIdleConns:        100,              // 最大空闲连接数
+		MaxIdleConnsPerHost: 20,               // 每个主机的最大空闲连接数
+		IdleConnTimeout:     90 * time.Second, // 空闲连接超时
+		DisableKeepAlives:   false,            // 启用连接复用
+		MaxConnsPerHost:     50,               // 每个主机的最大连接数
+		DialContext: (&net.Dialer{
+			Timeout:   30 * time.Second, // 连接超时
+			KeepAlive: 30 * time.Second, // 保持连接
+		}).DialContext,
+		ForceAttemptHTTP2:     true,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
+	})
+
+	// 设置重试机制
+	client.SetRetryCount(3)
+	client.SetRetryWaitTime(500 * time.Millisecond)
+	client.SetRetryMaxWaitTime(2 * time.Second)
 
 	return &TDengineDB{
 		client:   client,
@@ -212,7 +237,8 @@ func (td *TDengineDB) QueryByDeviceAndTimeRange(ctx context.Context, jobId strin
         SELECT ts, temperature, humidity, pressure, voltage, current, power, rpm, status, error_code, production_count, job_id, factory_id, device_id
         FROM %s.sensor_data 
         WHERE device_id = '%s' AND job_id = '%s' AND ts >= '%s' AND ts <= '%s'
-        ORDER BY ts`,
+        ORDER BY ts
+        `,
 		td.database, deviceID, jobId, start.Format("2006-01-02 15:04:05.000"), end.Format("2006-01-02 15:04:05.000"))
 
 	response, err := td.executeSQL(ctx, sql)
@@ -227,7 +253,7 @@ func (td *TDengineDB) QueryAggregation(ctx context.Context, jobId string, device
 	sql := fmt.Sprintf(`
         SELECT %s(temperature) as result
         FROM %s.sensor_data 
-        WHERE device_id = '%s' AND job_id = '%s' AND ts >= '%s' AND ts <= '%s'`,
+        WHERE device_id = '%s' AND job_id = '%s' AND ts >= '%s' AND ts <= '%s'    INTERVAL(1m) `,
 		aggType, td.database, deviceID, jobId, start.Format("2006-01-02 15:04:05.000"), end.Format("2006-01-02 15:04:05.000"))
 
 	response, err := td.executeSQL(ctx, sql)
@@ -236,7 +262,7 @@ func (td *TDengineDB) QueryAggregation(ctx context.Context, jobId string, device
 	}
 
 	if len(response.Data) == 0 || len(response.Data[0]) == 0 {
-		return 0, fmt.Errorf("no data found")
+		return 0, nil
 	}
 
 	result, ok := response.Data[0][0].(float64)
@@ -248,13 +274,20 @@ func (td *TDengineDB) QueryAggregation(ctx context.Context, jobId string, device
 }
 
 func (td *TDengineDB) QueryTimeRange(ctx context.Context, jobId string, start, end time.Time, limit int) ([]models.SensorData, error) {
+	/*        SELECT ts, temperature, humidity, pressure, voltage, current, power, rpm, status, error_code, production_count, job_id, factory_id, device_id
+	FROM %s.sensor_data
+	WHERE job_id = '%s' AND ts >= '%s' AND ts <= '%s'
+	ORDER BY ts
+	LIMIT %d*/
 	sql := fmt.Sprintf(`
-        SELECT ts, temperature, humidity, pressure, voltage, current, power, rpm, status, error_code, production_count, job_id, factory_id, device_id
-        FROM %s.sensor_data 
-        WHERE job_id = '%s' AND ts >= '%s' AND ts <= '%s'
-        ORDER BY ts
-        LIMIT %d`,
-		td.database, jobId, start.Format("2006-01-02 15:04:05.000"), end.Format("2006-01-02 15:04:05.000"), limit)
+        SELECT _wstart, avg(temperature) 
+	    FROM %s.sensor_data 
+        WHERE ts >= '%s' AND ts <= '%s' AND job_id = '%s'
+		INTERVAL(1m)
+         ORDER BY _wstart
+        LIMIT %d
+        `,
+		td.database, start.Format("2006-01-02 15:04:05.000"), end.Format("2006-01-02 15:04:05.000"), jobId, limit)
 
 	response, err := td.executeSQL(ctx, sql)
 	if err != nil {
@@ -274,7 +307,7 @@ func (td *TDengineDB) QueryGroupBy(ctx context.Context, jobId string, start, end
         PARTITION BY %s
         INTERVAL(%s)
         `,
-		groupBy, td.database, jobId, start.Format("2006-01-02 15:04:05.000"), end.Format("2006-01-02 15:04:05.000"), intervalStr, groupBy)
+		groupBy, td.database, jobId, start.Format("2006-01-02 15:04:05.000"), end.Format("2006-01-02 15:04:05.000"), groupBy, intervalStr)
 
 	response, err := td.executeSQL(ctx, sql)
 	if err != nil {
