@@ -132,13 +132,13 @@ func (db *InfluxDB) QueryAggregation(ctx context.Context, jobId string, deviceID
 	var aggFunc string
 	switch aggType {
 	case "avg":
-		aggFunc = "mean()"
+		aggFunc = "mean"
 	case "max":
-		aggFunc = "max()"
+		aggFunc = "max"
 	case "min":
-		aggFunc = "min()"
+		aggFunc = "min"
 	default:
-		aggFunc = "mean()"
+		aggFunc = "mean"
 	}
 
 	queryStr := fmt.Sprintf(`
