@@ -24,8 +24,9 @@ func NewDataGenerator(cfg *config.DataGenConfig) *DataGenerator {
 func (g *DataGenerator) GenerateData() ([]models.SensorData, error) {
 	var data []models.SensorData
 
-	startTime := time.Now().Add(-time.Duration(g.config.TimeSpanHours) * time.Hour)
-	endTime := time.Now()
+	now := time.Date(2025, 6, 27, 8, 01, 0, 0, time.UTC)
+	startTime := now.Add(-time.Duration(g.config.TimeSpanHours) * time.Hour)
+	endTime := now
 
 	// Calculate samples per device
 	totalDuration := endTime.Sub(startTime)

@@ -11,24 +11,24 @@ data_generation:
 
 databases:
   influxdb:
-    url: "http://192.168.100.190:8086"
+    url: "http://192.168.210.2:9096"
     token: "ipX7uq6r85YMd4nG6dhIMPMCsKffBGAqf-4uUaFPjI_gdWrlPB61SNadBt9UFB7YtVi9z2m9lIOQQfllPqW2Fg=="
     org: "testorg"
     bucket: "testbucket"
 
   tdengine:
-    dsn: "root:taosdata@tcp(192.168.100.190:6030)/"
+    dsn: "root:taosdata@tcp(192.168.210.2:6030)/"
     database: "benchmark_db"
 
   iotdb:
-    host: "192.168.100.190"
+    host: "192.168.210.2"
     port: 6667
     username: "root"
     password: "root"
 
 benchmark:
   ## concurrency_levels: [1, 5, 20, 50, 100]
-  concurrency_levels: [50]
+  concurrency_levels: [40]
   query_duration_seconds: 60
   warmup_duration_seconds: 10
   report_interval:

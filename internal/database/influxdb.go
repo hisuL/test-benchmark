@@ -97,39 +97,34 @@ func (db *InfluxDB) QueryByDeviceAndTimeRange(ctx context.Context, jobId string,
         from(bucket: "%s")
         |> range(start: %s, stop: %s)
         |> filter(fn: (r) => r._measurement == "sensor_data")
+		|> filter(fn: (r) => r["_field"] == "temperature")
         |> filter(fn: (r) => r.device_id == "%s")
 		|> filter(fn: (r) => r.job_id == "%s")
-        |> pivot(rowKey:["_time"], columnKey: ["_field"], valueColumn: "_value")
+		|> aggregateWindow(every: 1m, fn: mean, createEmpty: false)
+		|> yield(name: "mean")
     `, db.bucket, start.Format(time.RFC3339), end.Format(time.RFC3339), deviceID, jobId)
-	fmt.Printf(queryStr)
+	//fmt.Printf(queryStr)
 
 	result, err := db.queryAPI.Query(ctx, queryStr)
 	if err != nil {
+		fmt.Printf("QueryByDeviceAndTimeRange error: %v", err)
 		return nil, err
 	}
 
 	var data []models.SensorData
+	dateSize := 0
 	for result.Next() {
+		dateSize++
 		record := result.Record()
 		sensorData := models.SensorData{
-			Timestamp:       record.Time(),
-			FactoryID:       getStringValue(record, "factory_id"),
-			DeviceID:        getStringValue(record, "device_id"),
-			Temperature:     getFloatValue(record, "temperature"),
-			Humidity:        getFloatValue(record, "humidity"),
-			Pressure:        getFloatValue(record, "pressure"),
-			Voltage:         getFloatValue(record, "voltage"),
-			Current:         getFloatValue(record, "current"),
-			Power:           getFloatValue(record, "power"),
-			RPM:             getIntValue(record, "rpm"),
-			Status:          getStringValue(record, "status"),
-			ErrorCode:       int32(getIntValue(record, "error_code")),
-			ProductionCount: getIntValue(record, "production_count"),
+			Timestamp: record.Time(),
 		}
 		data = append(data, sensorData)
 	}
-	fmt.Printf("QueryByDeviceAndTimeRange Data size: %d\n", len(data))
-
+	if dateSize > 0 {
+		fmt.Printf("QueryByDeviceAndTimeRange Data size: %d\n", dateSize)
+	}
+	fmt.Printf("data size: %d\n", dateSize)
 	return data, result.Err()
 }
 
@@ -183,7 +178,7 @@ func (db *InfluxDB) QueryTimeRange(ctx context.Context, jobId string, start, end
         |> filter(fn: (r) => r._field == "temperature")
         |> aggregateWindow(every: 1m, fn: mean, createEmpty: false)
         |> limit(n: %d)
-        |> pivot(rowKey:["_time"], columnKey: ["_field"], valueColumn: "_value")
+        |> yield(name: "minute_aggregation")
     `, db.bucket, start.Format(time.RFC3339), end.Format(time.RFC3339), jobId, limit)
 
 	fmt.Printf(queryStr)
@@ -218,7 +213,7 @@ func (db *InfluxDB) QueryGroupBy(ctx context.Context, jobId string, start, end t
 	case "factory":
 		groupByClause = `|> group(columns: ["factory_id"])`
 	default:
-		groupByClause = fmt.Sprintf(`|> aggregateWindow(every: 1m, fn: mean)`, interval.String())
+		groupByClause = fmt.Sprintf(`|> aggregateWindow(every: 1m, fn: mean)`)
 	}
 
 	queryStr := fmt.Sprintf(`

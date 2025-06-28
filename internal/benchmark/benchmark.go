@@ -293,8 +293,8 @@ func (b *Benchmark) executeQuery(ctx context.Context, db database.Database, quer
 	var err error
 
 	deviceID := "device_111"
-	start := time.Date(2025, 6, 23, 15, 23, 0, 0, time.UTC)
-	end := time.Date(2025, 6, 24, 15, 23, 0, 0, time.UTC)
+	start := time.Date(2025, 6, 27, 8, 01, 0, 0, time.UTC)
+	end := time.Date(2025, 6, 28, 8, 01, 0, 0, time.UTC)
 	allJobIndex := b.jobCount
 	//从0到allJobIndex-1生成一个随机的jobId
 	jobId := fmt.Sprintf("job_%06d", b.rand.Intn(allJobIndex)+1)
