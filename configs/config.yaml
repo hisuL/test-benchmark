@@ -17,8 +17,11 @@ databases:
     bucket: "testbucket"
 
   tdengine:
-    dsn: "root:taosdata@tcp(192.168.210.2:6030)/"
-    database: "benchmark_db"
+    host: "192.168.210.2"
+    port: 6041
+    username: "root"
+    password: "taosdata"
+    database: "sensor_db"
 
   iotdb:
     host: "192.168.210.2"
@@ -28,7 +31,7 @@ databases:
 
 benchmark:
   ## concurrency_levels: [1, 5, 20, 50, 100]
-  concurrency_levels: [40]
+  concurrency_levels: [1]
   query_duration_seconds: 60
   warmup_duration_seconds: 10
   report_interval:

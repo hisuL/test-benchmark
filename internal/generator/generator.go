@@ -24,7 +24,7 @@ func NewDataGenerator(cfg *config.DataGenConfig) *DataGenerator {
 func (g *DataGenerator) GenerateData() ([]models.SensorData, error) {
 	var data []models.SensorData
 
-	now := time.Date(2025, 6, 27, 8, 01, 0, 0, time.UTC)
+	now := time.Date(2025, 6, 28, 8, 01, 0, 0, time.UTC)
 	startTime := now.Add(-time.Duration(g.config.TimeSpanHours) * time.Hour)
 	endTime := now
 

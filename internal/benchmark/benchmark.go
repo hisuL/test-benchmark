@@ -310,7 +310,7 @@ func (b *Benchmark) executeQuery(ctx context.Context, db database.Database, quer
 		_, err = db.QueryTimeRange(ctx, jobId, start, end, 1000)
 
 	case "group_by":
-		_, err = db.QueryGroupBy(ctx, jobId, start, end, "status", 1*time.Hour)
+		_, err = db.QueryGroupBy(ctx, jobId, start, end, "device_id", 1*time.Hour)
 
 	default:
 		err = fmt.Errorf("unknown query type: %s", queryType)

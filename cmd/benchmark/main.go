@@ -58,9 +58,13 @@ func main() {
 	}
 
 	if *dbFilter == "" || *dbFilter == "tdengine" {
-		tdengine := database.NewTDengine(
-			cfg.Databases.TDengine.DSN,
-			cfg.Databases.TDengine.Database,
+		tdConfig := cfg.Databases.TDengine
+		tdengine := database.NewTDengineDB(
+			tdConfig.Host,
+			tdConfig.Port,
+			tdConfig.Username,
+			tdConfig.Password,
+			tdConfig.Database,
 		)
 		bench.AddDatabase(tdengine)
 	}

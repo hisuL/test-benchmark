@@ -6,7 +6,7 @@ echo Building Go application...
 
 set GOOS=windows
 set GOARCH=amd64
-set CGO_ENABLED=0
+set CGO_ENABLED=1
 
 go mod tidy
 go build -o bin/datagen.exe cmd/datagen/main.go
