@@ -147,13 +147,13 @@ func (td *TDengineDB) CreateSchema(ctx context.Context) error {
         current FLOAT,
         power FLOAT,
         rpm BIGINT,
-        status NCHAR(20),
         error_code INT,
-        production_count BIGINT,
-        job_id NCHAR(64)
+        production_count BIGINT
     ) TAGS (
         factory_id NCHAR(32),
-        device_id NCHAR(32)
+        device_id NCHAR(32),
+		status NCHAR(20),
+     	job_id NCHAR(32)
     )`, td.database)
 
 	if _, err := td.executeSQL(ctx, createStableSQL); err != nil {
@@ -198,21 +198,26 @@ func (td *TDengineDB) writeSingleBatch(ctx context.Context, data []models.Sensor
 	sqlBuilder.WriteString("INSERT INTO ")
 
 	for i, record := range data {
-		tableName := fmt.Sprintf("%s.sensor_%s_%s",
+		tableName := fmt.Sprintf("%s.sensor_%s_%s_%s_%s",
 			td.database,
 			strings.ReplaceAll(record.FactoryID, "-", "_"),
-			strings.ReplaceAll(record.DeviceID, "-", "_"))
+			strings.ReplaceAll(record.DeviceID, "-", "_"),
+			strings.ReplaceAll(record.Status, "-", "_"),
+			strings.ReplaceAll(record.JobId, "-", "_"),
+		)
 
 		if i > 0 {
 			sqlBuilder.WriteString(" ")
 		}
 
 		sqlBuilder.WriteString(fmt.Sprintf(
-			"%s USING %s.sensor_data TAGS ('%s', '%s') VALUES (%d, %f, %f, %f, %f, %f, %f, %d, '%s', %d, %d, '%s')",
+			"%s USING %s.sensor_data TAGS ('%s', '%s', '%s', '%s') VALUES (%d, %f, %f, %f, %f, %f, %f, %d, %d, %d)",
 			tableName,
 			td.database,
 			record.FactoryID,
 			record.DeviceID,
+			record.Status,
+			record.JobId,
 			record.Timestamp.UnixMilli(),
 			record.Temperature,
 			record.Humidity,
@@ -221,10 +226,8 @@ func (td *TDengineDB) writeSingleBatch(ctx context.Context, data []models.Sensor
 			record.Current,
 			record.Power,
 			record.RPM,
-			record.Status,
 			record.ErrorCode,
 			record.ProductionCount,
-			record.JobId,
 		))
 	}
 
@@ -234,7 +237,7 @@ func (td *TDengineDB) writeSingleBatch(ctx context.Context, data []models.Sensor
 
 func (td *TDengineDB) QueryByDeviceAndTimeRange(ctx context.Context, jobId string, deviceID string, start, end time.Time) ([]models.SensorData, error) {
 	sql := fmt.Sprintf(`
-        SELECT ts, temperature, humidity, pressure, voltage, current, power, rpm, status, error_code, production_count, job_id, factory_id, device_id
+        SELECT ts, temperature, humidity, pressure, voltage, current, power, rpm,  error_code, production_count, factory_id, device_id
         FROM %s.sensor_data 
         WHERE device_id = '%s' AND job_id = '%s' AND ts >= '%s' AND ts <= '%s'
         ORDER BY ts
