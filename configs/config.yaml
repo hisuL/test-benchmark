@@ -11,7 +11,7 @@ data_generation:
 
 databases:
   influxdb:
-    url: "http://192.168.210.2:9096"
+    url: "http://192.168.210.2:8086"
     token: "ipX7uq6r85YMd4nG6dhIMPMCsKffBGAqf-4uUaFPjI_gdWrlPB61SNadBt9UFB7YtVi9z2m9lIOQQfllPqW2Fg=="
     org: "testorg"
     bucket: "testbucket"
@@ -31,7 +31,7 @@ databases:
 
 benchmark:
   ## concurrency_levels: [1, 5, 20, 50, 100]
-  concurrency_levels: [20]
+  concurrency_levels: [10]
   query_duration_seconds: 60
   warmup_duration_seconds: 10
   report_interval:

@@ -443,41 +443,48 @@ func (db *IoTDB) QueryGroupBy(ctx context.Context, jobId string, start, end time
 	var sql string
 	timeout := int64(60000)
 
-	switch groupBy {
-	case "device":
-		sql = fmt.Sprintf(`
+	/*	switch groupBy {
+			case "device":
+				sql = fmt.Sprintf(`
+		            SELECT device_id, AVG(temperature) as avg_temp
+		            FROM sensor_data
+		            WHERE time >= %d AND time <= %d AND job_id = '%s'
+		            GROUP BY device_id,  date_bin(1m, time)
+		        `, start.UnixMilli(), end.UnixMilli(), jobId)
+			case "factory":
+				sql = fmt.Sprintf(`
+		            SELECT factory_id, AVG(temperature) as avg_temp
+		            FROM sensor_data
+		            WHERE time >= %d AND time <= %d AND job_id = '%s'
+		            GROUP BY factory_id,  date_bin(1m, time)
+		        `, start.UnixMilli(), end.UnixMilli(), jobId)
+			case "status":
+				sql = fmt.Sprintf(`
+		            SELECT status, AVG(temperature) as avg_temp
+		            FROM sensor_data
+		            WHERE time >= %d AND time <= %d AND job_id = '%s'
+		            GROUP BY status,  date_bin(1m, time)
+		        `, start.UnixMilli(), end.UnixMilli(), jobId)
+			case "time":
+				// 表模型中的时间分组需要使用不同的语法
+				intervalMs := interval.Milliseconds()
+				sql = fmt.Sprintf(`
+		            SELECT (time / %d) * %d as time_bucket, AVG(temperature) as avg_temp
+		            FROM sensor_data
+		            WHERE time >= %d AND time <= %d AND job_id = '%s'
+		            GROUP BY time_bucket
+		            ORDER BY time_bucket
+		        `, intervalMs, intervalMs, start.UnixMilli(), end.UnixMilli(), jobId)
+			default:
+				return nil, fmt.Errorf("unsupported groupBy type: %s", groupBy)
+			}*/
+
+	sql = fmt.Sprintf(`
             SELECT device_id, AVG(temperature) as avg_temp
             FROM sensor_data
             WHERE time >= %d AND time <= %d AND job_id = '%s'
             GROUP BY device_id,  date_bin(1m, time)
         `, start.UnixMilli(), end.UnixMilli(), jobId)
-	case "factory":
-		sql = fmt.Sprintf(`
-            SELECT factory_id, AVG(temperature) as avg_temp
-            FROM sensor_data
-            WHERE time >= %d AND time <= %d AND job_id = '%s'
-            GROUP BY factory_id,  date_bin(1m, time)
-        `, start.UnixMilli(), end.UnixMilli(), jobId)
-	case "status":
-		sql = fmt.Sprintf(`
-            SELECT status, AVG(temperature) as avg_temp
-            FROM sensor_data 
-            WHERE time >= %d AND time <= %d AND job_id = '%s'
-            GROUP BY status,  date_bin(1m, time)
-        `, start.UnixMilli(), end.UnixMilli(), jobId)
-	case "time":
-		// 表模型中的时间分组需要使用不同的语法
-		intervalMs := interval.Milliseconds()
-		sql = fmt.Sprintf(`
-            SELECT (time / %d) * %d as time_bucket, AVG(temperature) as avg_temp
-            FROM sensor_data
-            WHERE time >= %d AND time <= %d AND job_id = '%s'
-            GROUP BY time_bucket
-            ORDER BY time_bucket
-        `, intervalMs, intervalMs, start.UnixMilli(), end.UnixMilli(), jobId)
-	default:
-		return nil, fmt.Errorf("unsupported groupBy type: %s", groupBy)
-	}
 
 	fmt.Printf("SQL: %s\n", sql)
 	dataSet, err := session.ExecuteQueryStatement(sql, &timeout)
