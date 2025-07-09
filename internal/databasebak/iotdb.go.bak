@@ -224,7 +224,7 @@ func (db *IoTDB) ensureTableExists(session client.ITableSession) error {
             status STRING FIELD,
             error_code INT32 FIELD,
             production_count INT64 FIELD,
-            job_id STRING TAG
+            job_id STRING FIELD
         )`
 
 	status, err := session.ExecuteNonQueryStatement(createTableSQL)
@@ -579,5 +579,3 @@ func formatInterval(interval time.Duration) string {
 		return fmt.Sprintf("%dms", milliseconds)
 	}
 }
-
-// select count(1) from benchmark.sensor_data; 查询总数

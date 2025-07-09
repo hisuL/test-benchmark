@@ -12,11 +12,7 @@ import (
 
 func main() {
 	var (
-		configPath   = flag.String("config", "configs/config.yaml", "Path to configuration file")
-		outputPath   = flag.String("output", "", "Output file path (overrides config)")
-		totalRecords = flag.Int64("records", 0, "Total records to generate (overrides config)")
-		deviceCount  = flag.Int("devices", 0, "Number of devices (overrides config)")
-		timeSpan     = flag.Int("timespan", 0, "Time span in hours (overrides config)")
+		configPath = flag.String("config", "configs/config.yaml", "Path to configuration file")
 	)
 	flag.Parse()
 
@@ -26,25 +22,6 @@ func main() {
 		fmt.Fprintf(os.Stderr, "Error loading config: %v\n", err)
 		os.Exit(1)
 	}
-
-	// Override config with command line parameters
-	if *totalRecords > 0 {
-		cfg.DataGeneration.TotalRecords = *totalRecords
-	}
-	if *deviceCount > 0 {
-		cfg.DataGeneration.DeviceCount = *deviceCount
-	}
-	if *timeSpan > 0 {
-		cfg.DataGeneration.TimeSpanHours = *timeSpan
-	}
-	if *outputPath != "" {
-		cfg.DataGeneration.OutputFile = *outputPath
-	}
-
-	fmt.Printf("Generating %d records across %d devices over %d hours\n",
-		cfg.DataGeneration.TotalRecords,
-		cfg.DataGeneration.DeviceCount,
-		cfg.DataGeneration.TimeSpanHours)
 
 	// Generate data
 	gen := generator.NewDataGenerator(&cfg.DataGeneration)

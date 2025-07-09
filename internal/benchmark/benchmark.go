@@ -21,21 +21,23 @@ import (
 )
 
 type Benchmark struct {
-	config      *config.Config
-	logger      *logrus.Logger
-	databases   []database.Database
-	testData    []models.SensorData
-	jobCount    int
-	rand        *rand.Rand
-	deviceCount int
+	config       *config.Config
+	logger       *logrus.Logger
+	databases    []database.Database
+	testData     []models.SensorData
+	jobCount     int
+	rand         *rand.Rand
+	deviceCount  int
+	factoryCount int
 }
 
 func NewBenchmark(cfg *config.Config, logger *logrus.Logger) *Benchmark {
 	return &Benchmark{
-		config:      cfg,
-		logger:      logger,
-		rand:        rand.New(rand.NewSource(time.Now().UnixNano())),
-		deviceCount: cfg.DataGeneration.DeviceCount,
+		config:       cfg,
+		logger:       logger,
+		rand:         rand.New(rand.NewSource(time.Now().UnixNano())),
+		deviceCount:  cfg.DataGeneration.DeviceCount,
+		factoryCount: cfg.DataGeneration.FactoryCount,
 	}
 }
 
@@ -102,38 +104,72 @@ func (b *Benchmark) RunWriteBenchmark(ctx context.Context) ([]models.WriteResult
 
 func (b *Benchmark) measureWritePerformance(ctx context.Context, db database.Database) (models.WriteResult, error) {
 	batchSize := b.config.DataGeneration.BatchSize
+	concurrency := b.config.Benchmark.ConcurrencyLevels[0] // 假设从配置中获取并发数，你也可以设为固定值
+
+	var latenciesMutex sync.Mutex
 	var latencies []float64
 	var errorCount int64
 
 	startTime := time.Now()
 
-	// Process data in batches
+	// 创建批次任务队列 - 直接使用 []models.SensorData
+	batches := make([][]models.SensorData, 0)
 	for i := 0; i < len(b.testData); i += batchSize {
 		end := i + batchSize
 		if end > len(b.testData) {
 			end = len(b.testData)
 		}
-
-		batch := b.testData[i:end]
-
-		batchStart := time.Now()
-		err := db.WriteBatch(ctx, batch)
-		batchDuration := time.Since(batchStart)
-
-		if err != nil {
-			atomic.AddInt64(&errorCount, 1)
-			b.logger.Errorf("Batch write error: %v", err)
-		} else {
-			latencies = append(latencies, float64(batchDuration.Nanoseconds())/1e6) // Convert to milliseconds
-		}
+		batches = append(batches, b.testData[i:end])
 	}
+
+	// 创建任务通道和等待组
+	batchChan := make(chan []models.SensorData, len(batches))
+	var wg sync.WaitGroup
+
+	// 将所有批次放入通道
+	for _, batch := range batches {
+		batchChan <- batch
+	}
+	close(batchChan)
+
+	// 启动 goroutine 处理批次
+	for i := 0; i < concurrency; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+
+			for batch := range batchChan {
+				batchStart := time.Now()
+				err := db.WriteBatch(ctx, batch)
+				batchDuration := time.Since(batchStart)
+
+				if err != nil {
+					atomic.AddInt64(&errorCount, 1)
+					b.logger.Errorf("Batch write error: %v", err)
+				} else {
+					latencyMs := float64(batchDuration.Nanoseconds()) / 1e6 // Convert to milliseconds
+
+					// 线程安全地添加延迟数据
+					latenciesMutex.Lock()
+					latencies = append(latencies, latencyMs)
+					latenciesMutex.Unlock()
+				}
+			}
+		}()
+	}
+
+	// 等待所有 goroutine 完成
+	wg.Wait()
 
 	totalDuration := time.Since(startTime)
 
-	// Calculate statistics
-	avgLatency, _ := stats.Mean(latencies)
-	p95Latency, _ := stats.Percentile(latencies, 95)
-	p99Latency, _ := stats.Percentile(latencies, 99)
+	// 计算统计信息
+	var avgLatency, p95Latency, p99Latency float64
+	if len(latencies) > 0 {
+		avgLatency, _ = stats.Mean(latencies)
+		p95Latency, _ = stats.Percentile(latencies, 95)
+		p99Latency, _ = stats.Percentile(latencies, 99)
+	}
 
 	throughput := float64(len(b.testData)) / totalDuration.Seconds()
 
@@ -292,19 +328,22 @@ func (b *Benchmark) executeQuery(ctx context.Context, db database.Database, quer
 
 	var err error
 
-	deviceID := "device_111"
-	start := time.Date(2025, 6, 27, 8, 01, 0, 0, time.UTC)
-	end := time.Date(2025, 6, 28, 8, 01, 0, 0, time.UTC)
-	allJobIndex := b.jobCount
+	startDay := b.config.DataGeneration.Day
+	start, _ := generator.ParseDay(startDay)
+	end := start.Add(24 * time.Hour)
+	allJobIndex := b.config.DataGeneration.JobCount
 	//从0到allJobIndex-1生成一个随机的jobId
-	jobId := fmt.Sprintf("job_%06d", b.rand.Intn(allJobIndex)+1)
-
+	randomId := b.rand.Intn(allJobIndex) + 1
+	jobId := fmt.Sprintf("job_%06d", randomId)
+	factoryId, deviceId := generator.GetDeviceByJobId(randomId, b.factoryCount, b.deviceCount)
+	fmt.Println("Executing query for jobId:", jobId, "factoryId:", factoryId, "deviceId:", deviceId)
+	deviceIdStr := fmt.Sprintf("device_%03d", deviceId)
 	switch queryType {
 	case "point_query":
-		_, err = db.QueryByDeviceAndTimeRange(ctx, jobId, deviceID, start, end)
+		_, err = db.QueryByDeviceAndTimeRange(ctx, jobId, deviceIdStr, start, end)
 
 	case "aggregation":
-		_, err = db.QueryAggregation(ctx, jobId, deviceID, start, end, "avg")
+		_, err = db.QueryAggregation(ctx, jobId, deviceIdStr, start, end, "avg")
 
 	case "range_query":
 		_, err = db.QueryTimeRange(ctx, jobId, start, end, 1000)

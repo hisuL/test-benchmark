@@ -148,11 +148,11 @@ func (td *TDengineDB) CreateSchema(ctx context.Context) error {
         power FLOAT,
         rpm BIGINT,
         error_code INT,
-        production_count BIGINT,
-		status NCHAR(20)
+        production_count BIGINT
     ) TAGS (
         factory_id NCHAR(32),
         device_id NCHAR(32),
+		status NCHAR(20),
      	job_id NCHAR(32)
     )`, td.database)
 
@@ -198,10 +198,11 @@ func (td *TDengineDB) writeSingleBatch(ctx context.Context, data []models.Sensor
 	sqlBuilder.WriteString("INSERT INTO ")
 
 	for i, record := range data {
-		tableName := fmt.Sprintf("%s.sensor_%s_%s_%s",
+		tableName := fmt.Sprintf("%s.sensor_%s_%s_%s_%s",
 			td.database,
 			strings.ReplaceAll(record.FactoryID, "-", "_"),
 			strings.ReplaceAll(record.DeviceID, "-", "_"),
+			strings.ReplaceAll(record.Status, "-", "_"),
 			strings.ReplaceAll(record.JobId, "-", "_"),
 		)
 
@@ -210,11 +211,12 @@ func (td *TDengineDB) writeSingleBatch(ctx context.Context, data []models.Sensor
 		}
 
 		sqlBuilder.WriteString(fmt.Sprintf(
-			"%s USING %s.sensor_data TAGS ('%s', '%s', '%s') VALUES (%d, %f, %f, %f, %f, %f, %f, %d, %d, %d, '%s')",
+			"%s USING %s.sensor_data TAGS ('%s', '%s', '%s', '%s') VALUES (%d, %f, %f, %f, %f, %f, %f, %d, %d, %d)",
 			tableName,
 			td.database,
 			record.FactoryID,
 			record.DeviceID,
+			record.Status,
 			record.JobId,
 			record.Timestamp.UnixMilli(),
 			record.Temperature,
@@ -226,7 +228,6 @@ func (td *TDengineDB) writeSingleBatch(ctx context.Context, data []models.Sensor
 			record.RPM,
 			record.ErrorCode,
 			record.ProductionCount,
-			record.Status,
 		))
 	}
 
@@ -398,5 +399,3 @@ func (td *TDengineDB) parseQueryResponse(response *TDengineResponse) ([]models.S
 
 	return results, nil
 }
-
-// select count (*) from sensor_db.sensor_data; 查询总数

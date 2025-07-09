@@ -1,13 +1,12 @@
 data_generation:
-  total_records: 10000000
-  time_span_hours: 24
-  day: "2025-06-20"
-  device_count: 50
+  device_count: 200
   factory_count: 10
-  sampling_rate_ms: 10000
-  batch_size: 1000
-  output_file: "generated_data.json"
   job_count: 200000
+  output_file: "generated_data.json"
+  day: "2025-06-30"
+  time_interval: 30
+  job_run_time: 3600
+  batch_size: 1000
 
 databases:
   influxdb:
@@ -25,13 +24,13 @@ databases:
 
   iotdb:
     host: "192.168.210.2"
-    port: 6667
+    port: 4667
     username: "root"
     password: "root"
 
 benchmark:
   ## concurrency_levels: [1, 5, 20, 50, 100]
-  concurrency_levels: [10]
+  concurrency_levels: [20]
   query_duration_seconds: 60
   warmup_duration_seconds: 10
   report_interval:

@@ -12,14 +12,14 @@ type Config struct {
 }
 
 type DataGenConfig struct {
-	TotalRecords   int64  `yaml:"total_records"`
-	TimeSpanHours  int    `yaml:"time_span_hours"`
-	DeviceCount    int    `yaml:"device_count"`
-	FactoryCount   int    `yaml:"factory_count"`
-	SamplingRateMs int    `yaml:"sampling_rate_ms"`
-	BatchSize      int    `yaml:"batch_size"`
-	OutputFile     string `yaml:"output_file"`
-	JobCount       int    `yaml:"job_count"`
+	DeviceCount  int    `yaml:"device_count"`  // 设备数量
+	FactoryCount int    `yaml:"factory_count"` // 工厂数量
+	OutputFile   string `yaml:"output_file"`   // 生成数据的输出文件路径
+	JobCount     int    `yaml:"job_count"`     // 生成数据的作业数量
+	Day          string `yaml:"day"`           // 生成数据的日期，格式为YYYY-MM-DD
+	TimeInterval int    `yaml:"time_interval"` // 采集时间间隔，单位为秒
+	JobRunTime   int    `yaml:"job_run_time"`  // 每个job固定运行时间，单位为秒
+	BatchSize    int    `yaml:"batch_size"`    // 批量插入的大小
 }
 
 type DatabasesConfig struct {
