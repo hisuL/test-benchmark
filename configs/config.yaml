@@ -1,7 +1,7 @@
 data_generation:
   device_count: 200
   factory_count: 10
-  job_count: 200000
+  job_count: 2000000
   output_file: "generated_data.json"
   day: "2025-06-30"
   time_interval: 30
@@ -10,7 +10,7 @@ data_generation:
 
 databases:
   influxdb:
-    url: "http://192.168.210.2:8086"
+    url: "http://192.168.210.2:9086"
     token: "ipX7uq6r85YMd4nG6dhIMPMCsKffBGAqf-4uUaFPjI_gdWrlPB61SNadBt9UFB7YtVi9z2m9lIOQQfllPqW2Fg=="
     org: "testorg"
     bucket: "testbucket"

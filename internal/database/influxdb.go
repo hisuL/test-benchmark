@@ -72,7 +72,7 @@ func (db *InfluxDB) WriteBatch(ctx context.Context, data []models.SensorData) er
 		p := influxdb2.NewPointWithMeasurement("sensor_data").
 			AddTag("factory_id", record.FactoryID).
 			AddTag("device_id", record.DeviceID).
-			AddTag("status", record.Status).
+			AddField("status", record.Status).
 			AddTag("job_id", record.JobId).
 			AddField("temperature", record.Temperature).
 			AddField("humidity", record.Humidity).

@@ -336,7 +336,7 @@ func (db *IoTDB) QueryAggregation(ctx context.Context, jobId string, deviceID st
 	sql := fmt.Sprintf(`
         SELECT %s(temperature) as agg_value
         FROM sensor_data
-        WHERE device_id = '%s' AND time >= %d AND time <= %d AND job_id = '%s GROUP BY  date_bin(1m, time) '
+        WHERE device_id = '%s' AND time >= %d AND time <= %d AND job_id = '%s' GROUP BY  date_bin(1m, time) 
     `, aggFunc, deviceID, start.UnixMilli(), end.UnixMilli(), jobId)
 
 	fmt.Printf("SQL: %s\n", sql)
