@@ -19,20 +19,25 @@ import (
 
 func main() {
 	var (
-		configPath = flag.String("config", "configs/config.yaml", "Path to configuration file")
-		outputDir  = flag.String("output", "results", "Output directory for results")
-		skipWrite  = flag.Bool("skip-write", false, "Skip write benchmark")
-		skipQuery  = flag.Bool("skip-query", false, "Skip query benchmark")
-		dbFilter   = flag.String("database", "", "Run benchmark for specific database only (influxdb|tdengine|iotdb)")
+		configPath   = flag.String("config", "configs/config.yaml", "Path to configuration file")
+		outputDir    = flag.String("output", "results", "Output directory for results")
+		skipWrite    = flag.Bool("skip-write", false, "Skip write benchmark")
+		skipQuery    = flag.Bool("skip-query", false, "Skip query benchmark")
+		dbFilter     = flag.String("database", "", "Run benchmark for specific database only (influxdb|tdengine|iotdb)")
+		skipGenerate = flag.Bool("skip-generate", false, "Skip data generation step, use existing data if available")
 	)
 	flag.Parse()
 
-	// Setup logger
+	// 添加参数验证日志
 	logger := logrus.New()
 	logger.SetLevel(logrus.InfoLevel)
 	logger.SetFormatter(&logrus.TextFormatter{
 		FullTimestamp: true,
 	})
+
+	// 打印参数值，使用与 flag 定义一致的名称
+	logger.Infof("Command line parameters: skip-generate=%v, skip-write=%v, skip-query=%v, database=%v",
+		*skipGenerate, *skipWrite, *skipQuery, *dbFilter)
 
 	// Load configuration
 	cfg, err := config.LoadConfig(*configPath)
@@ -81,10 +86,14 @@ func main() {
 	}
 
 	// Generate test data
-	logger.Info("Generating test data...")
-	err = bench.GenerateTestData()
-	if err != nil {
-		logger.Fatalf("Error generating test data: %v", err)
+	if !*skipGenerate {
+		logger.Info("Generating test data...")
+		err = bench.GenerateTestData()
+		if err != nil {
+			logger.Fatalf("Error generating test data: %v", err)
+		}
+	} else {
+		logger.Info("skipping data generation step, using existing data if available")
 	}
 
 	ctx := context.Background()

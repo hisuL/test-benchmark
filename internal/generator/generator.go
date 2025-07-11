@@ -1,9 +1,14 @@
 package generator
 
 import (
+	"bufio"
+	"encoding/binary"
+	"encoding/csv"
 	"fmt"
 	"math/rand"
+	"os"
 	"sort"
+	"strconv"
 	"time"
 
 	"test-benchmark/internal/config"
@@ -14,6 +19,12 @@ type DataGenerator struct {
 	config *config.DataGenConfig
 	rand   *rand.Rand
 }
+
+// 添加批次大小常量
+const batchSize = 10000
+
+// 添加用于二进制写入的常量
+const dataFileVersion = uint32(1)
 
 func NewDataGenerator(cfg *config.DataGenConfig) *DataGenerator {
 	return &DataGenerator{
@@ -297,4 +308,176 @@ func (g *DataGenerator) generateErrorCode(status string) int32 {
 		return int32(2000 + g.rand.Intn(10)) // Maintenance codes 2000-2009
 	}
 	return 0 // No error
+}
+
+// writeBatchToBinary 将一批数据写入二进制文件
+func writeBatchToBinary(writer *bufio.Writer, batch []models.SensorData) error {
+	for _, record := range batch {
+		// 写入时间戳
+		if err := binary.Write(writer, binary.LittleEndian, record.Timestamp.Unix()); err != nil {
+			return err
+		}
+
+		// 写入字符串长度和内容
+		writeString := func(s string) error {
+			length := uint16(len(s))
+			if err := binary.Write(writer, binary.LittleEndian, length); err != nil {
+				return err
+			}
+			_, err := writer.WriteString(s)
+			return err
+		}
+
+		// 写入各个字段
+		if err := writeString(record.FactoryID); err != nil {
+			return err
+		}
+		if err := writeString(record.JobId); err != nil {
+			return err
+		}
+		if err := writeString(record.DeviceID); err != nil {
+			return err
+		}
+
+		// 写入数值字段
+		if err := binary.Write(writer, binary.LittleEndian, record.Temperature); err != nil {
+			return err
+		}
+		if err := binary.Write(writer, binary.LittleEndian, record.Humidity); err != nil {
+			return err
+		}
+		if err := binary.Write(writer, binary.LittleEndian, record.Pressure); err != nil {
+			return err
+		}
+		if err := binary.Write(writer, binary.LittleEndian, record.Voltage); err != nil {
+			return err
+		}
+		if err := binary.Write(writer, binary.LittleEndian, record.Current); err != nil {
+			return err
+		}
+		if err := binary.Write(writer, binary.LittleEndian, record.Power); err != nil {
+			return err
+		}
+		if err := binary.Write(writer, binary.LittleEndian, record.RPM); err != nil {
+			return err
+		}
+		if err := writeString(record.Status); err != nil {
+			return err
+		}
+		if err := binary.Write(writer, binary.LittleEndian, record.ErrorCode); err != nil {
+			return err
+		}
+		if err := binary.Write(writer, binary.LittleEndian, record.ProductionCount); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// GenerateDataToFile 生成数据并直接写入CSV文件，保证全局时序
+func (g *DataGenerator) GenerateDataToFile(filename string) error {
+	// 1. 解析日期并设置起始时间
+	dayStart, err := ParseDay(g.config.Day)
+	if err != nil {
+		return fmt.Errorf("解析日期失败: %v", err)
+	}
+
+	// 2. 创建所有的数据采集事件（已按时间排序）
+	events := g.createDataCollectionEvents(dayStart)
+	totalRecords := len(events)
+
+	// 按时间分片，每个时间点的数据放在一起
+	timeSlices := make(map[int64][]DataCollectionEvent)
+	for _, event := range events {
+		timestamp := event.Time.Unix()
+		timeSlices[timestamp] = append(timeSlices[timestamp], event)
+	}
+
+	// 获取所有时间点并排序
+	timePoints := make([]int64, 0, len(timeSlices))
+	for ts := range timeSlices {
+		timePoints = append(timePoints, ts)
+	}
+	sort.Slice(timePoints, func(i, j int) bool {
+		return timePoints[i] < timePoints[j]
+	})
+
+	// 创建或截断文件
+	file, err := os.Create(filename)
+	if err != nil {
+		return fmt.Errorf("创建文件失败: %v", err)
+	}
+	defer file.Close()
+
+	writer := csv.NewWriter(file)
+	defer writer.Flush()
+
+	// 写入CSV表头
+	headers := []string{
+		"timestamp", "factory_id", "job_id", "device_id",
+		"temperature", "humidity", "pressure", "voltage",
+		"current", "power", "rpm", "status", "error_code",
+		"production_count",
+	}
+	if err := writer.Write(headers); err != nil {
+		return fmt.Errorf("写入表头失败: %v", err)
+	}
+
+	// 3. 按时间点顺序生成和写入数据
+	jobAssignments := g.assignJobsToDevices()
+	recordsWritten := 0
+	batch := make([][]string, 0, batchSize)
+
+	for _, timestamp := range timePoints {
+		// 处理同一时间点的所有事件
+		for _, event := range timeSlices[timestamp] {
+			assignment := jobAssignments[event.JobId-1]
+			factoryName := fmt.Sprintf("factory_%03d", assignment.FactoryId)
+			deviceName := fmt.Sprintf("device_%03d", assignment.DeviceId)
+			jobName := fmt.Sprintf("job_%06d", event.JobId)
+
+			record := g.generateSensorRecord(factoryName, jobName, deviceName, event.Time)
+			// 转换为CSV行
+			csvRecord := []string{
+				strconv.FormatInt(record.Timestamp.Unix(), 10),
+				record.FactoryID,
+				record.JobId,
+				record.DeviceID,
+				strconv.FormatFloat(float64(record.Temperature), 'f', 4, 32),
+				strconv.FormatFloat(float64(record.Humidity), 'f', 4, 32),
+				strconv.FormatFloat(float64(record.Pressure), 'f', 4, 32),
+				strconv.FormatFloat(float64(record.Voltage), 'f', 4, 32),
+				strconv.FormatFloat(float64(record.Current), 'f', 4, 32),
+				strconv.FormatFloat(float64(record.Power), 'f', 4, 32),
+				strconv.FormatInt(record.RPM, 10),
+				record.Status,
+				strconv.FormatInt(int64(record.ErrorCode), 10),
+				strconv.FormatInt(record.ProductionCount, 10),
+			}
+			batch = append(batch, csvRecord)
+
+			// 当批次满了就写入文件
+			if len(batch) >= batchSize {
+				if err := writer.WriteAll(batch); err != nil {
+					return fmt.Errorf("写入批次数据失败: %v", err)
+				}
+				recordsWritten += len(batch)
+				if recordsWritten%100000 == 0 {
+					fmt.Printf("已写入 %d/%d 条记录...当前时间点: %v\n",
+						recordsWritten, totalRecords, time.Unix(timestamp, 0))
+				}
+				batch = batch[:0]
+				writer.Flush() // 确保数据写入磁盘
+			}
+		}
+	}
+
+	// 写入剩余的数据
+	if len(batch) > 0 {
+		if err := writer.WriteAll(batch); err != nil {
+			return fmt.Errorf("写入剩余数据失败: %v", err)
+		}
+	}
+
+	return nil
 }

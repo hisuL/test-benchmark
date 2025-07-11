@@ -1,11 +1,14 @@
 package benchmark
 
 import (
+	"bufio"
 	"context"
 	"fmt"
 	"math/rand"
+	"os"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -45,20 +48,178 @@ func (b *Benchmark) AddDatabase(db database.Database) {
 	b.databases = append(b.databases, db)
 }
 
+const dataFileName = "benchmark_data.csv"
+
 func (b *Benchmark) GenerateTestData() error {
 	b.logger.Info("Generating test data...")
 
 	gen := generator.NewDataGenerator(&b.config.DataGeneration)
-	data, err := gen.GenerateData()
+	err := gen.GenerateDataToFile(dataFileName)
 	if err != nil {
 		return fmt.Errorf("failed to generate test data: %w", err)
 	}
 
-	b.testData = data
-	b.logger.Infof("Generated %d test records", len(data))
 	b.jobCount = b.config.DataGeneration.JobCount
-
 	return nil
+}
+
+// TimeSeriesData 用于排序的辅助结构
+type TimeSeriesData struct {
+	Records []models.SensorData
+}
+
+func (t TimeSeriesData) Len() int { return len(t.Records) }
+func (t TimeSeriesData) Less(i, j int) bool {
+	return t.Records[i].Timestamp.Before(t.Records[j].Timestamp)
+}
+func (t TimeSeriesData) Swap(i, j int) { t.Records[i], t.Records[j] = t.Records[j], t.Records[i] }
+
+func (b *Benchmark) processDataInBatches(ctx context.Context, db database.Database, batchSize int) (models.WriteResult, error) {
+	file, err := os.Open(dataFileName)
+	if err != nil {
+		return models.WriteResult{}, fmt.Errorf("failed to open data file: %w", err)
+	}
+	defer file.Close()
+
+	// 使用更大的缓冲区
+	scanner := bufio.NewScanner(file)
+	buf := make([]byte, 64*1024)   // 64KB 的缓冲区
+	scanner.Buffer(buf, 1024*1024) // 最大行长度设为 1MB
+
+	// 跳过表头
+	if !scanner.Scan() {
+		return models.WriteResult{}, fmt.Errorf("读取表头失败")
+	}
+
+	var totalRecords int64
+	var totalDuration time.Duration
+	var latencies []float64
+	var lastTimestamp int64 // 用于验证时间顺序
+
+	// 预分配足够大的批次空间
+	batch := make([]models.SensorData, 0, batchSize)
+	start := time.Now()
+
+	for scanner.Scan() {
+		// 检查上下文是否被取消
+		select {
+		case <-ctx.Done():
+			return models.WriteResult{}, ctx.Err()
+		default:
+		}
+
+		// 解析 CSV 行
+		line := scanner.Text()
+		fields := strings.Split(line, ",")
+		if len(fields) < 14 {
+			return models.WriteResult{}, fmt.Errorf("CSV 行格式错误: %s", line)
+		}
+
+		// 解析数据
+		timestamp, err := strconv.ParseInt(fields[0], 10, 64)
+		if err != nil {
+			return models.WriteResult{}, fmt.Errorf("解析时间戳失败: %w", err)
+		}
+
+		// 验证时间顺序
+		if lastTimestamp > timestamp {
+			return models.WriteResult{}, fmt.Errorf(
+				"数据时序错误: 发现了时间倒序的数据点 上一个时间戳: %v, 当前时间戳: %v",
+				time.Unix(lastTimestamp, 0),
+				time.Unix(timestamp, 0),
+			)
+		}
+		lastTimestamp = timestamp
+
+		// 转换数值字段
+		temperature, _ := strconv.ParseFloat(fields[4], 32)
+		humidity, _ := strconv.ParseFloat(fields[5], 32)
+		pressure, _ := strconv.ParseFloat(fields[6], 32)
+		voltage, _ := strconv.ParseFloat(fields[7], 32)
+		current, _ := strconv.ParseFloat(fields[8], 32)
+		power, _ := strconv.ParseFloat(fields[9], 32)
+		rpm, _ := strconv.ParseInt(fields[10], 10, 64)
+		errorCode, _ := strconv.ParseInt(fields[12], 10, 32)
+		productionCount, _ := strconv.ParseInt(fields[13], 10, 64)
+
+		// 创建记录
+		sensorData := models.SensorData{
+			Timestamp:       time.Unix(timestamp, 0),
+			FactoryID:       fields[1],
+			JobId:           fields[2],
+			DeviceID:        fields[3],
+			Temperature:     float32(temperature),
+			Humidity:        float32(humidity),
+			Pressure:        float32(pressure),
+			Voltage:         float32(voltage),
+			Current:         float32(current),
+			Power:           float32(power),
+			RPM:             rpm,
+			Status:          fields[11],
+			ErrorCode:       int32(errorCode),
+			ProductionCount: productionCount,
+		}
+
+		batch = append(batch, sensorData)
+
+		// 当批次满了就写入数据库
+		if len(batch) >= batchSize {
+			batchStart := time.Now()
+			if err := db.WriteBatch(ctx, batch); err != nil {
+				return models.WriteResult{}, fmt.Errorf("写入批次数据失败: %w", err)
+			}
+			batchDuration := time.Since(batchStart)
+
+			totalDuration += batchDuration
+			latencies = append(latencies, float64(batchDuration.Microseconds()))
+			totalRecords += int64(len(batch))
+
+			// 打印进度
+			if totalRecords%100000 == 0 {
+				b.logger.Infof("已处理 %d 条记录...当前时间点: %v",
+					totalRecords,
+					time.Unix(timestamp, 0),
+				)
+			}
+
+			batch = batch[:0]
+		}
+	}
+
+	// 检查扫描器错误
+	if err := scanner.Err(); err != nil {
+		return models.WriteResult{}, fmt.Errorf("扫描文件时出错: %w", err)
+	}
+
+	// 处理剩余的数据
+	if len(batch) > 0 {
+		batchStart := time.Now()
+		if err := db.WriteBatch(ctx, batch); err != nil {
+			return models.WriteResult{}, fmt.Errorf("写入剩余数据失败: %w", err)
+		}
+		batchDuration := time.Since(batchStart)
+
+		totalDuration += batchDuration
+		latencies = append(latencies, float64(batchDuration.Microseconds()))
+		totalRecords += int64(len(batch))
+	}
+
+	duration := time.Since(start)
+	avgLatency := totalDuration / time.Duration(totalRecords)
+	throughput := float64(totalRecords) / duration.Seconds()
+
+	p95, _ := stats.Percentile(latencies, 95)
+	p99, _ := stats.Percentile(latencies, 99)
+
+	return models.WriteResult{
+		Database:     db.Name(),
+		TotalRecords: totalRecords,
+		Duration:     duration,
+		Throughput:   throughput,
+		AvgLatency:   avgLatency,
+		P95Latency:   time.Duration(p95) * time.Microsecond,
+		P99Latency:   time.Duration(p99) * time.Microsecond,
+	}, nil
 }
 
 func (b *Benchmark) RunWriteBenchmark(ctx context.Context) ([]models.WriteResult, error) {
@@ -85,8 +246,8 @@ func (b *Benchmark) RunWriteBenchmark(ctx context.Context) ([]models.WriteResult
 			continue
 		}
 
-		// Measure write performance
-		result, err := b.measureWritePerformance(ctx, db)
+		// 使用分批处理方式进行写入测试
+		result, err := b.processDataInBatches(ctx, db, 100000)
 		if err != nil {
 			b.logger.Errorf("Write benchmark failed for %s: %v", db.Name(), err)
 			db.Close()
@@ -94,96 +255,13 @@ func (b *Benchmark) RunWriteBenchmark(ctx context.Context) ([]models.WriteResult
 		}
 
 		results = append(results, result)
+		db.Close()
 
 		b.logger.Infof("%s write results: %.2f records/sec, avg latency: %v",
 			db.Name(), result.Throughput, result.AvgLatency)
 	}
 
 	return results, nil
-}
-
-func (b *Benchmark) measureWritePerformance(ctx context.Context, db database.Database) (models.WriteResult, error) {
-	batchSize := b.config.DataGeneration.BatchSize
-	concurrency := b.config.Benchmark.ConcurrencyLevels[0] // 假设从配置中获取并发数，你也可以设为固定值
-
-	var latenciesMutex sync.Mutex
-	var latencies []float64
-	var errorCount int64
-
-	startTime := time.Now()
-
-	// 创建批次任务队列 - 直接使用 []models.SensorData
-	batches := make([][]models.SensorData, 0)
-	for i := 0; i < len(b.testData); i += batchSize {
-		end := i + batchSize
-		if end > len(b.testData) {
-			end = len(b.testData)
-		}
-		batches = append(batches, b.testData[i:end])
-	}
-
-	// 创建任务通道和等待组
-	batchChan := make(chan []models.SensorData, len(batches))
-	var wg sync.WaitGroup
-
-	// 将所有批次放入通道
-	for _, batch := range batches {
-		batchChan <- batch
-	}
-	close(batchChan)
-
-	// 启动 goroutine 处理批次
-	for i := 0; i < concurrency; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-
-			for batch := range batchChan {
-				batchStart := time.Now()
-				err := db.WriteBatch(ctx, batch)
-				batchDuration := time.Since(batchStart)
-
-				if err != nil {
-					atomic.AddInt64(&errorCount, 1)
-					b.logger.Errorf("Batch write error: %v", err)
-				} else {
-					latencyMs := float64(batchDuration.Nanoseconds()) / 1e6 // Convert to milliseconds
-
-					// 线程安全地添加延迟数据
-					latenciesMutex.Lock()
-					latencies = append(latencies, latencyMs)
-					latenciesMutex.Unlock()
-				}
-			}
-		}()
-	}
-
-	// 等待所有 goroutine 完成
-	wg.Wait()
-
-	totalDuration := time.Since(startTime)
-
-	// 计算统计信息
-	var avgLatency, p95Latency, p99Latency float64
-	if len(latencies) > 0 {
-		avgLatency, _ = stats.Mean(latencies)
-		p95Latency, _ = stats.Percentile(latencies, 95)
-		p99Latency, _ = stats.Percentile(latencies, 99)
-	}
-
-	throughput := float64(len(b.testData)) / totalDuration.Seconds()
-
-	return models.WriteResult{
-		Database:     db.Name(),
-		TotalRecords: int64(len(b.testData)),
-		JobCount:     b.jobCount,
-		Duration:     totalDuration,
-		Throughput:   throughput,
-		AvgLatency:   time.Duration(avgLatency * 1e6), // Convert back to nanoseconds
-		P95Latency:   time.Duration(p95Latency * 1e6),
-		P99Latency:   time.Duration(p99Latency * 1e6),
-		ErrorCount:   errorCount,
-	}, nil
 }
 
 func (b *Benchmark) RunQueryBenchmark(ctx context.Context) ([]models.QueryResult, error) {
