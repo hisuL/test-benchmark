@@ -2,6 +2,7 @@ package generator
 
 import (
 	"bufio"
+	"context"
 	"encoding/binary"
 	"encoding/csv"
 	"fmt"
@@ -308,6 +309,75 @@ func (g *DataGenerator) generateErrorCode(status string) int32 {
 		return int32(2000 + g.rand.Intn(10)) // Maintenance codes 2000-2009
 	}
 	return 0 // No error
+}
+
+// GenerateDataInBatches generates data and sends it through a channel in batches.
+// It signals when it's done by closing the channel.
+func (g *DataGenerator) GenerateDataInBatches(ctx context.Context, dataChan chan<- []models.SensorData, batchSize int) error {
+	defer close(dataChan) // Ensure channel is closed when generation is complete
+
+	// 1. 解析日期并设置起始时间
+	dayStart, err := ParseDay(g.config.Day)
+	if err != nil {
+		return fmt.Errorf("解析日期失败: %v", err)
+	}
+
+	// 2. 创建所有的数据采集事件（已按时间排序）
+	events := g.createDataCollectionEvents(dayStart)
+	totalRecords := len(events)
+	fmt.Printf("总共将生成 %d 条记录\n", totalRecords)
+
+	// 3. 按顺序生成数据并分批发送
+	jobAssignments := g.assignJobsToDevices()
+	batch := make([]models.SensorData, 0, batchSize)
+	recordsGenerated := 0
+
+	for _, event := range events {
+		select {
+		case <-ctx.Done():
+			fmt.Println("数据生成被取消")
+			return ctx.Err()
+		default:
+			// continue generation
+		}
+
+		assignment := jobAssignments[event.JobId-1]
+		factoryName := fmt.Sprintf("factory_%03d", assignment.FactoryId)
+		deviceName := fmt.Sprintf("device_%03d", assignment.DeviceId)
+		jobName := fmt.Sprintf("job_%06d", event.JobId)
+
+		record := g.generateSensorRecord(factoryName, jobName, deviceName, event.Time)
+		batch = append(batch, record)
+
+		if len(batch) >= batchSize {
+			select {
+			case dataChan <- batch:
+				recordsGenerated += len(batch)
+				if recordsGenerated%100000 == 0 {
+					fmt.Printf("已生成 %d/%d 条记录...\n", recordsGenerated, totalRecords)
+				}
+				batch = make([]models.SensorData, 0, batchSize) // 创建新的切片
+			case <-ctx.Done():
+				fmt.Println("数据生成在发送批次时被取消")
+				return ctx.Err()
+			}
+		}
+	}
+
+	// 发送最后一批不完整的数据
+	if len(batch) > 0 {
+		select {
+		case dataChan <- batch:
+			recordsGenerated += len(batch)
+			fmt.Printf("已生成 %d/%d 条记录 (最后一批)...\n", recordsGenerated, totalRecords)
+		case <-ctx.Done():
+			fmt.Println("数据生成在发送最后一批时被取消")
+			return ctx.Err()
+		}
+	}
+
+	fmt.Println("所有数据都已成功生成和发送")
+	return nil
 }
 
 // writeBatchToBinary 将一批数据写入二进制文件

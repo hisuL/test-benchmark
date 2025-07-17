@@ -1,11 +1,14 @@
 package benchmark
 
 import (
+	"bufio"
 	"context"
 	"fmt"
 	"math/rand"
+	"os"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -13,7 +16,6 @@ import (
 
 	"github.com/montanaflynn/stats"
 	"github.com/sirupsen/logrus"
-	"golang.org/x/sync/errgroup"
 
 	"test-benchmark/internal/config"
 	"test-benchmark/internal/database"
@@ -46,53 +48,160 @@ func (b *Benchmark) AddDatabase(db database.Database) {
 	b.databases = append(b.databases, db)
 }
 
-// processBatchesFromChannel 从 channel 中读取数据批次并写入数据库
-func (b *Benchmark) processBatchesFromChannel(ctx context.Context, db database.Database, dataChan <-chan []models.SensorData) (models.WriteResult, error) {
+const dataFileName = "benchmark_data.csv"
+
+func (b *Benchmark) GenerateTestData() error {
+	b.logger.Info("Generating test data...")
+
+	gen := generator.NewDataGenerator(&b.config.DataGeneration)
+	err := gen.GenerateDataToFile(dataFileName)
+	if err != nil {
+		return fmt.Errorf("failed to generate test data: %w", err)
+	}
+
+	b.jobCount = b.config.DataGeneration.JobCount
+	return nil
+}
+
+// TimeSeriesData 用于排序的辅助结构
+type TimeSeriesData struct {
+	Records []models.SensorData
+}
+
+func (t TimeSeriesData) Len() int { return len(t.Records) }
+func (t TimeSeriesData) Less(i, j int) bool {
+	return t.Records[i].Timestamp.Before(t.Records[j].Timestamp)
+}
+func (t TimeSeriesData) Swap(i, j int) { t.Records[i], t.Records[j] = t.Records[j], t.Records[i] }
+
+func (b *Benchmark) processDataInBatches(ctx context.Context, db database.Database, batchSize int) (models.WriteResult, error) {
+	file, err := os.Open(dataFileName)
+	if err != nil {
+		return models.WriteResult{}, fmt.Errorf("failed to open data file: %w", err)
+	}
+	defer file.Close()
+
+	// 使用更大的缓冲区
+	scanner := bufio.NewScanner(file)
+	buf := make([]byte, 64*1024)   // 64KB 的缓冲区
+	scanner.Buffer(buf, 1024*1024) // 最大行长度设为 1MB
+
+	// 跳过表头
+	if !scanner.Scan() {
+		return models.WriteResult{}, fmt.Errorf("读取表头失败")
+	}
+
 	var totalRecords int64
 	var totalDuration time.Duration
 	var latencies []float64
-	var wg sync.WaitGroup
+	var lastTimestamp int64 // 用于验证时间顺序
+
+	// 预分配足够大的批次空间
+	batch := make([]models.SensorData, 0, batchSize)
 	start := time.Now()
 
-	// 使用 WaitGroup 来等待所有批次处理完成
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		for batch := range dataChan {
-			// 检查上下文是否被取消
-			select {
-			case <-ctx.Done():
-				b.logger.Warnf("上下文取消，停止处理批次")
-				return
-			default:
-			}
+	for scanner.Scan() {
+		// 检查上下文是否被取消
+		select {
+		case <-ctx.Done():
+			return models.WriteResult{}, ctx.Err()
+		default:
+		}
 
+		// 解析 CSV 行
+		line := scanner.Text()
+		fields := strings.Split(line, ",")
+		if len(fields) < 14 {
+			return models.WriteResult{}, fmt.Errorf("CSV 行格式错误: %s", line)
+		}
+
+		// 解析数据
+		timestamp, err := strconv.ParseInt(fields[0], 10, 64)
+		if err != nil {
+			return models.WriteResult{}, fmt.Errorf("解析时间戳失败: %w", err)
+		}
+
+		// 验证时间顺序
+		if lastTimestamp > timestamp {
+			return models.WriteResult{}, fmt.Errorf(
+				"数据时序错误: 发现了时间倒序的数据点 上一个时间戳: %v, 当前时间戳: %v",
+				time.Unix(lastTimestamp, 0),
+				time.Unix(timestamp, 0),
+			)
+		}
+		lastTimestamp = timestamp
+
+		// 转换数值字段
+		temperature, _ := strconv.ParseFloat(fields[4], 32)
+		humidity, _ := strconv.ParseFloat(fields[5], 32)
+		pressure, _ := strconv.ParseFloat(fields[6], 32)
+		voltage, _ := strconv.ParseFloat(fields[7], 32)
+		current, _ := strconv.ParseFloat(fields[8], 32)
+		power, _ := strconv.ParseFloat(fields[9], 32)
+		rpm, _ := strconv.ParseInt(fields[10], 10, 64)
+		errorCode, _ := strconv.ParseInt(fields[12], 10, 32)
+		productionCount, _ := strconv.ParseInt(fields[13], 10, 64)
+
+		// 创建记录
+		sensorData := models.SensorData{
+			Timestamp:       time.Unix(timestamp, 0),
+			FactoryID:       fields[1],
+			JobId:           fields[2],
+			DeviceID:        fields[3],
+			Temperature:     float32(temperature),
+			Humidity:        float32(humidity),
+			Pressure:        float32(pressure),
+			Voltage:         float32(voltage),
+			Current:         float32(current),
+			Power:           float32(power),
+			RPM:             rpm,
+			Status:          fields[11],
+			ErrorCode:       int32(errorCode),
+			ProductionCount: productionCount,
+		}
+
+		batch = append(batch, sensorData)
+
+		// 当批次满了就写入数据库
+		if len(batch) >= batchSize {
 			batchStart := time.Now()
 			if err := db.WriteBatch(ctx, batch); err != nil {
-				// 在实际应用中，这里可能需要更复杂的错误处理
-				b.logger.Errorf("写入批次数据失败 for %s: %v", db.Name(), err)
-				continue // 继续处理下一个批次
+				return models.WriteResult{}, fmt.Errorf("写入批次数据失败: %w", err)
 			}
 			batchDuration := time.Since(batchStart)
 
 			totalDuration += batchDuration
 			latencies = append(latencies, float64(batchDuration.Microseconds()))
-			atomic.AddInt64(&totalRecords, int64(len(batch)))
+			totalRecords += int64(len(batch))
 
 			// 打印进度
-			processed := atomic.LoadInt64(&totalRecords)
-			if processed%100000 == 0 {
-				b.logger.Infof("已为 %s 处理 %d 条记录...", db.Name(), processed)
+			if totalRecords%100000 == 0 {
+				b.logger.Infof("已处理 %d 条记录...当前时间点: %v",
+					totalRecords,
+					time.Unix(timestamp, 0),
+				)
 			}
+
+			batch = batch[:0]
 		}
-	}()
+	}
 
-	wg.Wait() // 等待 channel 关闭且所有数据处理完毕
+	// 检查扫描器错误
+	if err := scanner.Err(); err != nil {
+		return models.WriteResult{}, fmt.Errorf("扫描文件时出错: %w", err)
+	}
 
-	// 检查是否处理了任何记录
-	if totalRecords == 0 {
-		b.logger.Warnf("没有为 %s 处理任何记录", db.Name())
-		return models.WriteResult{Database: db.Name()}, nil
+	// 处理剩余的数据
+	if len(batch) > 0 {
+		batchStart := time.Now()
+		if err := db.WriteBatch(ctx, batch); err != nil {
+			return models.WriteResult{}, fmt.Errorf("写入剩余数据失败: %w", err)
+		}
+		batchDuration := time.Since(batchStart)
+
+		totalDuration += batchDuration
+		latencies = append(latencies, float64(batchDuration.Microseconds()))
+		totalRecords += int64(len(batch))
 	}
 
 	duration := time.Since(start)
@@ -110,7 +219,6 @@ func (b *Benchmark) processBatchesFromChannel(ctx context.Context, db database.D
 		AvgLatency:   avgLatency,
 		P95Latency:   time.Duration(p95) * time.Microsecond,
 		P99Latency:   time.Duration(p99) * time.Microsecond,
-		JobCount:     b.config.DataGeneration.JobCount,
 	}, nil
 }
 
@@ -118,7 +226,6 @@ func (b *Benchmark) RunWriteBenchmark(ctx context.Context) ([]models.WriteResult
 	b.logger.Info("Starting write benchmark...")
 
 	var results []models.WriteResult
-	const writeBatchSize = 200000 // 定义写入数据库的批次大小
 
 	for _, db := range b.databases {
 		b.logger.Infof("Testing write performance for %s", db.Name())
@@ -128,7 +235,6 @@ func (b *Benchmark) RunWriteBenchmark(ctx context.Context) ([]models.WriteResult
 			b.logger.Errorf("Failed to connect to %s: %v", db.Name(), err)
 			continue
 		}
-		defer db.Close()
 
 		if err := db.DropSchema(ctx); err != nil {
 			b.logger.Warnf("Failed to drop schema for %s: %v", db.Name(), err)
@@ -136,52 +242,20 @@ func (b *Benchmark) RunWriteBenchmark(ctx context.Context) ([]models.WriteResult
 
 		if err := db.CreateSchema(ctx); err != nil {
 			b.logger.Errorf("Failed to create schema for %s: %v", db.Name(), err)
+			db.Close()
 			continue
 		}
 
-		// 创建用于数据生成的 generator
-		gen := generator.NewDataGenerator(&b.config.DataGeneration)
-		dataChan := make(chan []models.SensorData, 100) // 带缓冲的 channel
-
-		// 使用 errgroup 来管理 goroutines 和错误
-		g, gCtx := errgroup.WithContext(ctx)
-
-		// Goroutine 1: 生成数据
-		g.Go(func() error {
-			b.logger.Infof("Starting data generation for %s...", db.Name())
-			err := gen.GenerateDataInBatches(gCtx, dataChan, writeBatchSize)
-			if err != nil {
-				b.logger.Errorf("Data generation failed for %s: %v", db.Name(), err)
-			} else {
-				b.logger.Infof("Data generation finished for %s.", db.Name())
-			}
-			return err
-		})
-
-		// Goroutine 2: 处理数据
-		var result models.WriteResult
-		var processErr error
-		g.Go(func() error {
-			b.logger.Infof("Starting data processing for %s...", db.Name())
-			result, processErr = b.processBatchesFromChannel(gCtx, db, dataChan)
-			if processErr != nil {
-				b.logger.Errorf("Data processing failed for %s: %v", db.Name(), processErr)
-			} else {
-				b.logger.Infof("Data processing finished for %s.", db.Name())
-			}
-			return processErr
-		})
-
-		// 等待两个 goroutine 完成
-		if err := g.Wait(); err != nil {
-			// 如果是 context aanceled，则可能是正常退出
-			if err != context.Canceled && err != context.DeadlineExceeded {
-				b.logger.Errorf("Write benchmark failed for %s: %v", db.Name(), err)
-				continue
-			}
+		// 使用分批处理方式进行写入测试
+		result, err := b.processDataInBatches(ctx, db, 100000)
+		if err != nil {
+			b.logger.Errorf("Write benchmark failed for %s: %v", db.Name(), err)
+			db.Close()
+			continue
 		}
 
 		results = append(results, result)
+		db.Close()
 
 		b.logger.Infof("%s write results: %.2f records/sec, avg latency: %v",
 			db.Name(), result.Throughput, result.AvgLatency)

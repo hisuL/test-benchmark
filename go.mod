@@ -8,6 +8,7 @@ require (
 	github.com/influxdata/influxdb-client-go/v2 v2.14.0
 	github.com/montanaflynn/stats v0.7.1
 	github.com/sirupsen/logrus v1.9.3
+	golang.org/x/sync v0.0.0-20190423024810-112230192c58
 	gopkg.in/yaml.v3 v3.0.1
 )
 
