@@ -145,18 +145,27 @@ func (b *Benchmark) RunWriteBenchmark(ctx context.Context) ([]models.WriteResult
 
 		// 使用 errgroup 来管理 goroutines 和错误
 		g, gCtx := errgroup.WithContext(ctx)
+		var wg sync.WaitGroup
 
-		// Goroutine 1: 生成数据
-		g.Go(func() error {
+		// Goroutine 1: 生成数据 (独立于 errgroup)
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			defer close(dataChan) // 确保在生成结束后关闭 channel
 			b.logger.Infof("Starting data generation for %s...", db.Name())
-			err := gen.GenerateDataInBatches(gCtx, dataChan, writeBatchSize)
-			if err != nil {
+			// 使用父级 context (ctx) 而不是 gCtx，以避免被处理协程提前取消
+			err := gen.GenerateDataInBatches(ctx, dataChan, writeBatchSize)
+			if err != nil && err != context.Canceled {
 				b.logger.Errorf("Data generation failed for %s: %v", db.Name(), err)
+				// 如果生成失败，也需要取消处理协程
+				// 使用 g.Go 返回错误会取消 gCtx
+				g.Go(func() error {
+					return fmt.Errorf("data generation was canceled: %w", err)
+				})
 			} else {
 				b.logger.Infof("Data generation finished for %s.", db.Name())
 			}
-			return err
-		})
+		}()
 
 		// Goroutine 2: 处理数据
 		var result models.WriteResult
@@ -172,14 +181,16 @@ func (b *Benchmark) RunWriteBenchmark(ctx context.Context) ([]models.WriteResult
 			return processErr
 		})
 
-		// 等待两个 goroutine 完成
+		// 等待数据处理 goroutine 完成
 		if err := g.Wait(); err != nil {
-			// 如果是 context aanceled，则可能是正常退出
+			// 如果是 context aanceled，则可能是正常退出或由生成器取消
 			if err != context.Canceled && err != context.DeadlineExceeded {
 				b.logger.Errorf("Write benchmark failed for %s: %v", db.Name(), err)
-				continue
 			}
 		}
+
+		// 确保数据生成协程也已完成
+		wg.Wait()
 
 		results = append(results, result)
 
