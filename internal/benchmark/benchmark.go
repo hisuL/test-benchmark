@@ -13,8 +13,6 @@ import (
 
 	"github.com/montanaflynn/stats"
 	"github.com/sirupsen/logrus"
-	"golang.org/x/sync/errgroup"
-
 	"test-benchmark/internal/config"
 	"test-benchmark/internal/database"
 	"test-benchmark/internal/generator"
@@ -30,6 +28,12 @@ type Benchmark struct {
 	rand         *rand.Rand
 	deviceCount  int
 	factoryCount int
+}
+
+// 添加一个带时间戳的打印函数
+func (b *Benchmark) logf(format string, args ...interface{}) {
+	timestamp := time.Now().Format("2006-01-02 15:04:05.000")
+	fmt.Printf("[%s] %s\n", timestamp, fmt.Sprintf(format, args...))
 }
 
 func NewBenchmark(cfg *config.Config, logger *logrus.Logger) *Benchmark {
@@ -70,7 +74,7 @@ func (b *Benchmark) processBatchesFromChannel(ctx context.Context, db database.D
 			batchStart := time.Now()
 			if err := db.WriteBatch(ctx, batch); err != nil {
 				// 在实际应用中，这里可能需要更复杂的错误处理
-				b.logger.Errorf("写入批次数据失败 for %s: %v", db.Name(), err)
+				b.logf("写入批次数据失败 for %s: %v", db.Name(), err)
 				continue // 继续处理下一个批次
 			}
 			batchDuration := time.Since(batchStart)
@@ -82,7 +86,7 @@ func (b *Benchmark) processBatchesFromChannel(ctx context.Context, db database.D
 			// 打印进度
 			processed := atomic.LoadInt64(&totalRecords)
 			if processed%100000 == 0 {
-				b.logger.Infof("已为 %s 处理 %d 条记录...", db.Name(), processed)
+				b.logf("已为 %s 处理 %d 条记录...", db.Name(), processed)
 			}
 		}
 	}()
@@ -114,87 +118,164 @@ func (b *Benchmark) processBatchesFromChannel(ctx context.Context, db database.D
 	}, nil
 }
 
+func (b *Benchmark) processBatchesSequentially(ctx context.Context, db database.Database, batchSize int) (models.WriteResult, error) {
+	var totalRecords int64
+	var totalDuration time.Duration
+	var latencies []float64
+
+	// 创建数据生成器
+	gen := generator.NewDataGenerator(&b.config.DataGeneration)
+
+	start := time.Now()
+	offset := 0
+	batchCount := 0
+
+	for {
+		// 检查上下文是否被取消
+		select {
+		case <-ctx.Done():
+			b.logger.Warnf("上下文取消，停止处理")
+			break
+		default:
+		}
+
+		// 生成一批数据
+		b.logf("生成第 %d 批数据 (从记录 %d 开始)...", batchCount+1, offset+1)
+		batchData, isComplete, err := gen.GenerateDataBatch(ctx, offset, batchSize)
+		if err != nil {
+			return models.WriteResult{Database: db.Name()}, fmt.Errorf("生成数据失败: %v", err)
+		}
+
+		if len(batchData) == 0 {
+			b.logf("没有更多数据需要处理")
+			break
+		}
+
+		// 将数据分成更小的批次写入数据库（避免单次写入过多数据）
+		const dbWriteBatchSize = 200000 // 20万条记录一次写入
+		err = b.writeDataInSmallBatches(ctx, db, batchData, dbWriteBatchSize, &totalRecords, &totalDuration, &latencies)
+		if err != nil {
+			return models.WriteResult{Database: db.Name()}, fmt.Errorf("写入数据失败: %v", err)
+		}
+
+		batchCount++
+		offset += len(batchData)
+
+		// 手动释放内存
+		batchData = nil
+		runtime.GC()
+
+		b.logf("第 %d 批数据处理完成，累计处理 %d 条记录", batchCount, totalRecords)
+
+		if isComplete {
+			b.logf("所有数据处理完成")
+			break
+		}
+	}
+
+	if totalRecords == 0 {
+		b.logf("没有为 %s 处理任何记录", db.Name())
+		return models.WriteResult{Database: db.Name()}, nil
+	}
+
+	duration := time.Since(start)
+	avgLatency := totalDuration / time.Duration(totalRecords)
+	throughput := float64(totalRecords) / duration.Seconds()
+
+	p95, _ := stats.Percentile(latencies, 95)
+	p99, _ := stats.Percentile(latencies, 99)
+
+	return models.WriteResult{
+		Database:     db.Name(),
+		TotalRecords: totalRecords,
+		Duration:     duration,
+		Throughput:   throughput,
+		AvgLatency:   avgLatency,
+		P95Latency:   time.Duration(p95) * time.Microsecond,
+		P99Latency:   time.Duration(p99) * time.Microsecond,
+		JobCount:     b.config.DataGeneration.JobCount,
+	}, nil
+}
+
+func (b *Benchmark) writeDataInSmallBatches(ctx context.Context, db database.Database, data []models.SensorData,
+	writeBatchSize int, totalRecords *int64, totalDuration *time.Duration, latencies *[]float64) error {
+
+	dataLen := len(data)
+	b.logf("开始为 %s 写入 %d 条记录，每批次大小为 %d 条记录", db.Name(), dataLen, writeBatchSize)
+
+	for i := 0; i < dataLen; i += writeBatchSize {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+
+		end := i + writeBatchSize
+		if end > dataLen {
+			end = dataLen
+		}
+
+		batch := data[i:end]
+
+		b.logf("为 %s 准备写入批次: %d 到 %d (共 %d 条记录)", db.Name(), i+1, end, len(batch))
+		// 写入数据库
+		batchStart := time.Now()
+		if err := db.WriteBatch(ctx, batch); err != nil {
+			return fmt.Errorf("写入批次数据失败: %v", err)
+		}
+		batchDuration := time.Since(batchStart)
+
+		b.logf("为 %s 写入批次完成，耗时 %v", db.Name(), batchDuration)
+		// 更新统计信息
+		*totalDuration += batchDuration
+		*latencies = append(*latencies, float64(batchDuration.Microseconds()))
+		atomic.AddInt64(totalRecords, int64(len(batch)))
+
+		// 打印进度
+		processed := atomic.LoadInt64(totalRecords)
+		if processed%1000000 == 0 { // 每100万条记录打印一次
+			b.logf("已为 %s 处理 %d 条记录...", db.Name(), processed)
+		}
+	}
+
+	return nil
+}
+
 func (b *Benchmark) RunWriteBenchmark(ctx context.Context) ([]models.WriteResult, error) {
-	b.logger.Info("Starting write benchmark...")
+	b.logf("Starting write benchmark...")
 
 	var results []models.WriteResult
-	const writeBatchSize = 200000 // 定义写入数据库的批次大小
+	const writeBatchSize = 20000000 // 2000万条记录
 
 	for _, db := range b.databases {
-		b.logger.Infof("Testing write performance for %s", db.Name())
+		b.logf("Testing write performance for %s", db.Name())
 
 		// Connect and prepare schema
 		if err := db.Connect(ctx); err != nil {
-			b.logger.Errorf("Failed to connect to %s: %v", db.Name(), err)
+			b.logf("Failed to connect to %s: %v", db.Name(), err)
 			continue
 		}
 		defer db.Close()
 
 		if err := db.DropSchema(ctx); err != nil {
-			b.logger.Warnf("Failed to drop schema for %s: %v", db.Name(), err)
+			b.logf("Failed to drop schema for %s: %v", db.Name(), err)
 		}
 
 		if err := db.CreateSchema(ctx); err != nil {
-			b.logger.Errorf("Failed to create schema for %s: %v", db.Name(), err)
+			b.logf("Failed to create schema for %s: %v", db.Name(), err)
 			continue
 		}
 
-		// 创建用于数据生成的 generator
-		gen := generator.NewDataGenerator(&b.config.DataGeneration)
-		dataChan := make(chan []models.SensorData, 100) // 带缓冲的 channel
-
-		// 使用 errgroup 来管理 goroutines 和错误
-		g, gCtx := errgroup.WithContext(ctx)
-		var wg sync.WaitGroup
-
-		// Goroutine 1: 生成数据 (独立于 errgroup)
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			defer close(dataChan) // 确保在生成结束后关闭 channel
-			b.logger.Infof("Starting data generation for %s...", db.Name())
-			// 使用父级 context (ctx) 而不是 gCtx，以避免被处理协程提前取消
-			err := gen.GenerateDataInBatches(ctx, dataChan, writeBatchSize)
-			if err != nil && err != context.Canceled {
-				b.logger.Errorf("Data generation failed for %s: %v", db.Name(), err)
-				// 如果生成失败，也需要取消处理协程
-				// 使用 g.Go 返回错误会取消 gCtx
-				g.Go(func() error {
-					return fmt.Errorf("data generation was canceled: %w", err)
-				})
-			} else {
-				b.logger.Infof("Data generation finished for %s.", db.Name())
-			}
-		}()
-
-		// Goroutine 2: 处理数据
-		var result models.WriteResult
-		var processErr error
-		g.Go(func() error {
-			b.logger.Infof("Starting data processing for %s...", db.Name())
-			result, processErr = b.processBatchesFromChannel(gCtx, db, dataChan)
-			if processErr != nil {
-				b.logger.Errorf("Data processing failed for %s: %v", db.Name(), processErr)
-			} else {
-				b.logger.Infof("Data processing finished for %s.", db.Name())
-			}
-			return processErr
-		})
-
-		// 等待数据处理 goroutine 完成
-		if err := g.Wait(); err != nil {
-			// 如果是 context aanceled，则可能是正常退出或由生成器取消
-			if err != context.Canceled && err != context.DeadlineExceeded {
-				b.logger.Errorf("Write benchmark failed for %s: %v", db.Name(), err)
-			}
+		// 使用新的同步处理方法
+		result, err := b.processBatchesSequentially(ctx, db, writeBatchSize)
+		if err != nil {
+			b.logf("Write benchmark failed for %s: %v", db.Name(), err)
+			continue
 		}
-
-		// 确保数据生成协程也已完成
-		wg.Wait()
 
 		results = append(results, result)
 
-		b.logger.Infof("%s write results: %.2f records/sec, avg latency: %v",
+		b.logf("%s write results: %.2f records/sec, avg latency: %v",
 			db.Name(), result.Throughput, result.AvgLatency)
 	}
 
@@ -209,9 +290,9 @@ func (b *Benchmark) RunQueryBenchmark(ctx context.Context) ([]models.QueryResult
 	queryTypes := []string{"point_query", "aggregation", "range_query", "group_by"}
 
 	for _, db := range b.databases {
-		b.logger.Infof("Testing query performance for %s", db.Name())
+		b.logf("Testing query performance for %s", db.Name())
 
-		b.logger.Info("check db connection before running query benchmark")
+		b.logf("check db connection before running query benchmark")
 
 		// Connect and prepare schema
 		if err := db.Connect(ctx); err != nil {
@@ -220,7 +301,7 @@ func (b *Benchmark) RunQueryBenchmark(ctx context.Context) ([]models.QueryResult
 		}
 
 		for _, concurrency := range b.config.Benchmark.ConcurrencyLevels {
-			b.logger.Infof("Testing with %d concurrent connections", concurrency)
+			b.logf("Testing with %d concurrent connections", concurrency)
 
 			for _, queryType := range queryTypes {
 				result, err := b.measureQueryPerformance(ctx, db, queryType, concurrency)
@@ -232,7 +313,7 @@ func (b *Benchmark) RunQueryBenchmark(ctx context.Context) ([]models.QueryResult
 
 				allResults = append(allResults, result)
 
-				b.logger.Infof("%s %s (concurrency %d): %.2f QPS, avg latency: %v",
+				b.logf("%s %s (concurrency %d): %.2f QPS, avg latency: %v",
 					db.Name(), queryType, concurrency, result.QPS, result.AvgLatency)
 			}
 		}
@@ -256,7 +337,7 @@ func (b *Benchmark) measureQueryPerformance(ctx context.Context, db database.Dat
 	defer cancel()
 
 	// Warmup phase
-	b.logger.Infof("Warmup phase for %s", queryType)
+	b.logf("Warmup phase for %s", queryType)
 	warmupEnd := time.Now().Add(warmup)
 
 	for i := 0; i < concurrency; i++ {
@@ -272,7 +353,7 @@ func (b *Benchmark) measureQueryPerformance(ctx context.Context, db database.Dat
 	wg.Wait()
 
 	// Actual benchmark phase
-	b.logger.Infof("Benchmark phase for %s", queryType)
+	b.logf("Benchmark phase for %s", queryType)
 	benchmarkEnd := time.Now().Add(duration)
 	startTime := time.Now()
 
@@ -351,7 +432,7 @@ func (b *Benchmark) executeQuery(ctx context.Context, db database.Database, quer
 	randomId := b.rand.Intn(allJobIndex) + 1
 	jobId := fmt.Sprintf("job_%06d", randomId)
 	factoryId, deviceId := generator.GetDeviceByJobId(randomId, b.factoryCount, b.deviceCount)
-	fmt.Println("Executing query for jobId:", jobId, "factoryId:", factoryId, "deviceId:", deviceId)
+	b.logf("Executing query for jobId: %s, factoryId: %s, deviceId: %s", jobId, factoryId, deviceId)
 	deviceIdStr := fmt.Sprintf("device_%03d", deviceId)
 	switch queryType {
 	case "point_query":
@@ -396,22 +477,22 @@ func (b *Benchmark) GenerateReport(writeResults []models.WriteResult, queryResul
 }
 
 func (b *Benchmark) PrintResults(report *models.BenchmarkReport) {
-	fmt.Println("\n" + strings.Repeat("=", 80))
-	fmt.Println("TSDB BENCHMARK REPORT")
-	fmt.Println(strings.Repeat("=", 80))
-	fmt.Printf("Generated at: %s\n", report.Timestamp.Format("2006-01-02 15:04:05"))
-	fmt.Printf("System: %s, CPU Cores: %d, Memory: %s\n\n",
+	b.logf("\n" + strings.Repeat("=", 80))
+	b.logf("TSDB BENCHMARK REPORT")
+	b.logf(strings.Repeat("=", 80))
+	b.logf("Generated at: %s", report.Timestamp.Format("2006-01-02 15:04:05"))
+	b.logf("System: %s, CPU Cores: %d, Memory: %s\n",
 		report.SystemInfo.OS, report.SystemInfo.CPUCores, report.SystemInfo.Memory)
 
 	// Write performance results
-	fmt.Println("WRITE PERFORMANCE")
-	fmt.Println(strings.Repeat("-", 80))
-	fmt.Printf("%-12s %-12s %-12s %-12s %-12s %-12s %-12s\n",
+	b.logf("WRITE PERFORMANCE")
+	b.logf(strings.Repeat("-", 80))
+	b.logf("%-12s %-12s %-12s %-12s %-12s %-12s %-12s",
 		"Database", "Records", "jobCount", "Duration", "Throughput", "Avg Latency", "P99 Latency")
-	fmt.Println(strings.Repeat("-", 80))
+	b.logf(strings.Repeat("-", 80))
 
 	for _, result := range report.WriteResults {
-		fmt.Printf("%-12s %-12d %-12d %-12s %-12.0f %-12s %-12s\n",
+		b.logf("%-12s %-12d %-12d %-12s %-12.0f %-12s %-12s",
 			result.Database,
 			result.TotalRecords,
 			result.JobCount,
@@ -422,19 +503,19 @@ func (b *Benchmark) PrintResults(report *models.BenchmarkReport) {
 	}
 
 	// Query performance results by concurrency
-	fmt.Println("\nQUERY PERFORMANCE BY CONCURRENCY")
-	fmt.Println(strings.Repeat("-", 120))
+	b.logf("\nQUERY PERFORMANCE BY CONCURRENCY")
+	b.logf(strings.Repeat("-", 120))
 
 	for _, concurrency := range b.config.Benchmark.ConcurrencyLevels {
-		fmt.Printf("\nConcurrency Level: %d\n", concurrency)
-		fmt.Println(strings.Repeat("-", 120))
-		fmt.Printf("%-12s %-15s %-8s %-12s %-12s %-12s %-12s\n",
+		b.logf("\nConcurrency Level: %d", concurrency)
+		b.logf(strings.Repeat("-", 120))
+		b.logf("%-12s %-15s %-8s %-12s %-12s %-12s %-12s",
 			"Database", "Query Type", "QPS", "Avg Latency", "P95 Latency", "P99 Latency", "Success Rate")
-		fmt.Println(strings.Repeat("-", 120))
+		b.logf(strings.Repeat("-", 120))
 
 		for _, result := range report.QueryResults {
 			if result.Concurrency == concurrency {
-				fmt.Printf("%-12s %-15s %-8.1f %-12s %-12s %-12s %-12.1f%%\n",
+				b.logf("%-12s %-15s %-8.1f %-12s %-12s %-12s %-12.1f%%",
 					result.Database,
 					result.QueryType,
 					result.QPS,
@@ -451,9 +532,9 @@ func (b *Benchmark) PrintResults(report *models.BenchmarkReport) {
 }
 
 func (b *Benchmark) printSummaryAndRecommendations(report *models.BenchmarkReport) {
-	fmt.Println("\n" + strings.Repeat("=", 80))
-	fmt.Println("SUMMARY AND RECOMMENDATIONS")
-	fmt.Println(strings.Repeat("=", 80))
+	b.logf("\n" + strings.Repeat("=", 80))
+	b.logf("SUMMARY AND RECOMMENDATIONS")
+	b.logf(strings.Repeat("=", 80))
 
 	// Find best write performance
 	var bestWrite models.WriteResult
@@ -464,7 +545,7 @@ func (b *Benchmark) printSummaryAndRecommendations(report *models.BenchmarkRepor
 	}
 
 	if bestWrite.Database != "" {
-		fmt.Printf("Best Write Performance: %s (%.0f records/sec)\n",
+		b.logf("Best Write Performance: %s (%.0f records/sec)",
 			bestWrite.Database, bestWrite.Throughput)
 	}
 
@@ -488,20 +569,20 @@ func (b *Benchmark) printSummaryAndRecommendations(report *models.BenchmarkRepor
 		}
 
 		if bestDB != "" {
-			fmt.Printf("Best Query Performance (Concurrency %d): %s (%.1f total QPS)\n",
+			b.logf("Best Query Performance (Concurrency %d): %s (%.1f total QPS)",
 				concurrency, bestDB, bestQPS)
 		}
 	}
 
 	// Recommendations
-	fmt.Println("\nRECOMMENDATIONS:")
+	b.logf("\nRECOMMENDATIONS:")
 
 	// Write performance recommendation
 	if len(report.WriteResults) > 0 {
-		fmt.Printf("• For high-throughput writes: %s shows best performance\n", bestWrite.Database)
+		b.logf("• For high-throughput writes: %s shows best performance", bestWrite.Database)
 
 		if bestWrite.Throughput < 10000 {
-			fmt.Println("• Consider optimizing batch sizes and parallel writers for better throughput")
+			b.logf("• Consider optimizing batch sizes and parallel writers for better throughput")
 		}
 	}
 
@@ -510,15 +591,15 @@ func (b *Benchmark) printSummaryAndRecommendations(report *models.BenchmarkRepor
 	highConcurrencyBest := b.findBestQueryDB(report.QueryResults, []int{50, 100})
 
 	if lowConcurrencyBest != "" {
-		fmt.Printf("• For low concurrency queries: %s performs best\n", lowConcurrencyBest)
+		b.logf("• For low concurrency queries: %s performs best", lowConcurrencyBest)
 	}
 
 	if highConcurrencyBest != "" {
-		fmt.Printf("• For high concurrency queries: %s performs best\n", highConcurrencyBest)
+		b.logf("• For high concurrency queries: %s performs best", highConcurrencyBest)
 	}
 
-	fmt.Println("• Consider connection pooling and query optimization for production use")
-	fmt.Println("• Monitor memory usage and disk I/O in production environments")
+	b.logf("• Consider connection pooling and query optimization for production use")
+	b.logf("• Monitor memory usage and disk I/O in production environments")
 }
 
 func (b *Benchmark) findBestQueryDB(results []models.QueryResult, concurrencyLevels []int) string {

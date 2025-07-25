@@ -145,12 +145,12 @@ func (db *InfluxDB) QueryAggregation(ctx context.Context, jobId string, deviceID
         from(bucket: "%s")
         |> range(start: %s, stop: %s)
         |> filter(fn: (r) => r._measurement == "sensor_data")
-        |> filter(fn: (r) => r.device_id == "%s")
         |> filter(fn: (r) => r.job_id == "%s")
+        |> filter(fn: (r) => r.device_id == "%s")
         |> filter(fn: (r) => r._field == "temperature")
         |> aggregateWindow(every: 1m, fn: %s, createEmpty: false)
         |> yield(name: "minute_aggregation")
-    `, db.bucket, start.Format(time.RFC3339), end.Format(time.RFC3339), deviceID, jobId, aggFunc)
+    `, db.bucket, start.Format(time.RFC3339), end.Format(time.RFC3339), jobId, deviceID, aggFunc)
 
 	fmt.Printf("Query: %s\n", queryStr)
 

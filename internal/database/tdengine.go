@@ -255,8 +255,8 @@ func (td *TDengineDB) QueryAggregation(ctx context.Context, jobId string, device
 	sql := fmt.Sprintf(`
         SELECT %s(temperature) as result
         FROM %s.sensor_data 
-        WHERE device_id = '%s' AND job_id = '%s' AND ts >= '%s' AND ts <= '%s'    INTERVAL(1m) `,
-		aggType, td.database, deviceID, jobId, start.Format("2006-01-02 15:04:05.000"), end.Format("2006-01-02 15:04:05.000"))
+        WHERE job_id = '%s' AND ts >= '%s' AND ts <= '%s' AND  device_id = '%s'     INTERVAL(1m) `,
+		aggType, td.database, jobId, start.Format("2006-01-02 15:04:05.000"), end.Format("2006-01-02 15:04:05.000"), deviceID)
 
 	response, err := td.executeSQL(ctx, sql)
 	if err != nil {

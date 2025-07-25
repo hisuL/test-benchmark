@@ -148,54 +148,154 @@ func (db *IoTDB) WriteBatch(ctx context.Context, data []models.SensorData) error
 		return nil
 	}
 
+	batchStart := time.Now()
+	fmt.Printf("[%s] WriteBatch 开始，数据量: %d\n", time.Now().Format("2006-01-02 15:04:05.000"), len(data))
+
 	session, err := db.sessionPool.GetSession()
 	if err != nil {
 		return fmt.Errorf("failed to get session: %w", err)
 	}
 	defer session.Close()
 
+	sessionTime := time.Since(batchStart)
+	fmt.Printf("[%s] 获取session耗时: %v\n", time.Now().Format("2006-01-02 15:04:05.000"), sessionTime)
+
 	// 确保表存在
+	tableStart := time.Now()
 	err = db.ensureTableExists(session)
 	if err != nil {
 		return fmt.Errorf("failed to ensure table exists: %w", err)
 	}
+	tableTime := time.Since(tableStart)
+	fmt.Printf("[%s] 确保表存在耗时: %v\n", time.Now().Format("2006-01-02 15:04:05.000"), tableTime)
 
-	// 构建批量插入SQL
-	var valueStrings []string
-	for _, record := range data {
-		valueString := fmt.Sprintf(
-			"('%s', '%s', %d, %f, %f, %f, %f, %f, %f, %d, '%s', %d, %d, '%s')",
-			record.FactoryID,
-			record.DeviceID,
-			record.Timestamp.UnixMilli(),
-			record.Temperature,
-			record.Humidity,
-			record.Pressure,
-			record.Voltage,
-			record.Current,
-			record.Power,
-			record.RPM,
-			strings.ReplaceAll(record.Status, "'", "''"), // 转义单引号
-			record.ErrorCode,
-			record.ProductionCount,
-			strings.ReplaceAll(record.JobId, "'", "''"), // 转义单引号
-		)
-		valueStrings = append(valueStrings, valueString)
+	// 分批处理，避免单次SQL过大
+	const batchSize = 1000
+	totalBatches := (len(data) + batchSize - 1) / batchSize
+	fmt.Printf("[%s] 将分成 %d 个批次处理，每批次 %d 条记录\n", time.Now().Format("2006-01-02 15:04:05.000"), totalBatches, batchSize)
+
+	var totalBuildTime time.Duration
+	var totalExecTime time.Duration
+
+	for i := 0; i < len(data); i += batchSize {
+		batchNum := i/batchSize + 1
+		batchStart := time.Now()
+
+		end := i + batchSize
+		if end > len(data) {
+			end = len(data)
+		}
+
+		batch := data[i:end]
+		fmt.Printf("[%s] 开始处理第 %d/%d 批次，记录数: %d\n", time.Now().Format("2006-01-02 15:04:05.000"), batchNum, totalBatches, len(batch))
+
+		// 字符串构建开始时间
+		buildStart := time.Now()
+
+		// 使用 strings.Builder 优化字符串构建
+		var builder strings.Builder
+		builder.Grow(len(batch)*180 + 150) // 预分配内存
+
+		builder.WriteString("INSERT INTO sensor_data (factory_id, device_id, time, temperature, humidity, pressure, voltage, current, power, rpm, status, error_code, production_count, job_id) VALUES ")
+
+		for j, record := range batch {
+			if j > 0 {
+				builder.WriteString(", ")
+			}
+
+			builder.WriteByte('(')
+			builder.WriteByte('\'')
+			builder.WriteString(record.FactoryID)
+			builder.WriteString("', '")
+			builder.WriteString(record.DeviceID)
+			builder.WriteString("', ")
+
+			// 时间戳转换
+			builder.WriteString(strconv.FormatInt(record.Timestamp.UnixMilli(), 10))
+			builder.WriteString(", ")
+
+			// float32 转换
+			builder.WriteString(strconv.FormatFloat(float64(record.Temperature), 'g', -1, 32))
+			builder.WriteString(", ")
+			builder.WriteString(strconv.FormatFloat(float64(record.Humidity), 'g', -1, 32))
+			builder.WriteString(", ")
+			builder.WriteString(strconv.FormatFloat(float64(record.Pressure), 'g', -1, 32))
+			builder.WriteString(", ")
+			builder.WriteString(strconv.FormatFloat(float64(record.Voltage), 'g', -1, 32))
+			builder.WriteString(", ")
+			builder.WriteString(strconv.FormatFloat(float64(record.Current), 'g', -1, 32))
+			builder.WriteString(", ")
+			builder.WriteString(strconv.FormatFloat(float64(record.Power), 'g', -1, 32))
+			builder.WriteString(", ")
+
+			// int64 转换
+			builder.WriteString(strconv.FormatInt(record.RPM, 10))
+			builder.WriteString(", '")
+
+			// 优化字符串转义
+			if strings.Contains(record.Status, "'") {
+				builder.WriteString(strings.ReplaceAll(record.Status, "'", "''"))
+			} else {
+				builder.WriteString(record.Status)
+			}
+
+			builder.WriteString("', ")
+
+			// int32 转换
+			builder.WriteString(strconv.FormatInt(int64(record.ErrorCode), 10))
+			builder.WriteString(", ")
+
+			// int64 转换
+			builder.WriteString(strconv.FormatInt(record.ProductionCount, 10))
+			builder.WriteString(", '")
+
+			// 优化字符串转义
+			if strings.Contains(record.JobId, "'") {
+				builder.WriteString(strings.ReplaceAll(record.JobId, "'", "''"))
+			} else {
+				builder.WriteString(record.JobId)
+			}
+
+			builder.WriteString("')")
+		}
+
+		insertSQL := builder.String()
+		buildTime := time.Since(buildStart)
+		totalBuildTime += buildTime
+
+		fmt.Printf("[%s] 第 %d 批次 SQL构建耗时: %v, SQL长度: %d 字符\n", time.Now().Format("2006-01-02 15:04:05.000"), batchNum, buildTime, len(insertSQL))
+
+		// SQL执行开始时间
+		execStart := time.Now()
+		status, err := session.ExecuteNonQueryStatement(insertSQL)
+		if err != nil {
+			return fmt.Errorf("failed to insert batch data: %w", err)
+		}
+		if err = checkError(status, err); err != nil {
+			return fmt.Errorf("failed to insert batch data: %w", err)
+		}
+		execTime := time.Since(execStart)
+		totalExecTime += execTime
+
+		batchTotalTime := time.Since(batchStart)
+		fmt.Printf("[%s] 第 %d 批次 SQL执行耗时: %v, 批次总耗时: %v\n", time.Now().Format("2006-01-02 15:04:05.000"), batchNum, execTime, batchTotalTime)
+
+		// 每10个批次打印一次进度统计
+		if batchNum%10 == 0 || batchNum == totalBatches {
+			avgBuildTime := totalBuildTime / time.Duration(batchNum)
+			avgExecTime := totalExecTime / time.Duration(batchNum)
+			fmt.Printf("[%s] === 进度统计 (%d/%d) === 平均构建耗时: %v, 平均执行耗时: %v\n",
+				time.Now().Format("2006-01-02 15:04:05.000"), batchNum, totalBatches, avgBuildTime, avgExecTime)
+		}
 	}
 
-	// 批量插入到单一表
-	insertSQL := fmt.Sprintf(
-		"INSERT INTO sensor_data (factory_id, device_id, time, temperature, humidity, pressure, voltage, current, power, rpm, status, error_code, production_count, job_id) VALUES %s",
-		strings.Join(valueStrings, ", "),
-	)
-
-	status, err := session.ExecuteNonQueryStatement(insertSQL)
-	if err != nil {
-		return fmt.Errorf("failed to insert data: %w", err)
-	}
-	if err = checkError(status, err); err != nil {
-		return fmt.Errorf("failed to insert data: %w", err)
-	}
+	totalTime := time.Since(batchStart)
+	fmt.Printf("[%s] WriteBatch 完成！总耗时: %v, 总构建耗时: %v, 总执行耗时: %v\n",
+		time.Now().Format("2006-01-02 15:04:05.000"), totalTime, totalBuildTime, totalExecTime)
+	fmt.Printf("[%s] 构建时间占比: %.2f%%, 执行时间占比: %.2f%%\n",
+		time.Now().Format("2006-01-02 15:04:05.000"),
+		float64(totalBuildTime)/float64(totalTime)*100,
+		float64(totalExecTime)/float64(totalTime)*100)
 
 	return nil
 }
@@ -254,9 +354,9 @@ func (db *IoTDB) QueryByDeviceAndTimeRange(ctx context.Context, jobId string, de
 	sql := fmt.Sprintf(`
         SELECT factory_id, device_id, time, temperature, humidity, pressure, voltage, current, power, rpm, status, error_code, production_count, job_id
         FROM sensor_data
-        WHERE device_id = '%s' AND time >= %d AND time <= %d AND job_id = '%s'
+        WHERE  time >= %d AND time <= %d AND job_id = '%s' AND device_id = '%s' 
         ORDER BY time
-    `, deviceID, start.UnixMilli(), end.UnixMilli(), jobId)
+    `, start.UnixMilli(), end.UnixMilli(), jobId, deviceID)
 
 	fmt.Printf("SQL: %s\n", sql)
 	timeout := int64(60000)
@@ -336,8 +436,8 @@ func (db *IoTDB) QueryAggregation(ctx context.Context, jobId string, deviceID st
 	sql := fmt.Sprintf(`
         SELECT %s(temperature) as agg_value
         FROM sensor_data
-        WHERE device_id = '%s' AND time >= %d AND time <= %d AND job_id = '%s' GROUP BY  date_bin(1m, time) 
-    `, aggFunc, deviceID, start.UnixMilli(), end.UnixMilli(), jobId)
+        WHERE time >= %d AND time <= %d AND job_id = '%s' AND  device_id = '%s'    GROUP BY  date_bin(1m, time) 
+    `, aggFunc, start.UnixMilli(), end.UnixMilli(), jobId, deviceID)
 
 	fmt.Printf("SQL: %s\n", sql)
 	timeout := int64(60000)

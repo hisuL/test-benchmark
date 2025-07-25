@@ -2,10 +2,10 @@ package generator
 
 import (
 	"bufio"
-	"context"
 	"encoding/binary"
 	"encoding/csv"
 	"fmt"
+	"golang.org/x/net/context"
 	"math/rand"
 	"os"
 	"sort"
@@ -17,8 +17,10 @@ import (
 )
 
 type DataGenerator struct {
-	config *config.DataGenConfig
-	rand   *rand.Rand
+	config         *config.DataGenConfig
+	rand           *rand.Rand
+	allEvents      []DataCollectionEvent // 添加这个字段
+	jobAssignments []JobAssignment       // 添加这个字段
 }
 
 // 添加批次大小常量
@@ -311,73 +313,56 @@ func (g *DataGenerator) generateErrorCode(status string) int32 {
 	return 0 // No error
 }
 
-// GenerateDataInBatches generates data and sends it through a channel in batches.
-// It signals when it's done by closing the channel.
-func (g *DataGenerator) GenerateDataInBatches(ctx context.Context, dataChan chan<- []models.SensorData, batchSize int) error {
-	defer close(dataChan) // Ensure channel is closed when generation is complete
-
+// 在 generator 包中添加新的方法
+func (g *DataGenerator) GenerateDataBatch(ctx context.Context, startOffset, batchSize int) ([]models.SensorData, bool, error) {
 	// 1. 解析日期并设置起始时间
 	dayStart, err := ParseDay(g.config.Day)
 	if err != nil {
-		return fmt.Errorf("解析日期失败: %v", err)
+		return nil, false, fmt.Errorf("解析日期失败: %v", err)
 	}
 
-	// 2. 创建所有的数据采集事件（已按时间排序）
-	events := g.createDataCollectionEvents(dayStart)
-	totalRecords := len(events)
-	fmt.Printf("总共将生成 %d 条记录\n", totalRecords)
+	// 2. 创建所有的数据采集事件（如果还没有创建的话）
+	if g.allEvents == nil {
+		g.allEvents = g.createDataCollectionEvents(dayStart)
+		g.jobAssignments = g.assignJobsToDevices()
+		g.logf("总共将生成 %d 条记录\n", len(g.allEvents))
+	}
 
-	// 3. 按顺序生成数据并分批发送
-	jobAssignments := g.assignJobsToDevices()
-	batch := make([]models.SensorData, 0, batchSize)
-	recordsGenerated := 0
+	totalRecords := len(g.allEvents)
+	endOffset := startOffset + batchSize
+	if endOffset > totalRecords {
+		endOffset = totalRecords
+	}
 
-	for _, event := range events {
+	// 检查是否已经处理完所有数据
+	if startOffset >= totalRecords {
+		return nil, true, nil // 返回 true 表示已完成
+	}
+
+	// 3. 生成当前批次的数据
+	batch := make([]models.SensorData, 0, endOffset-startOffset)
+
+	for i := startOffset; i < endOffset; i++ {
 		select {
 		case <-ctx.Done():
-			fmt.Println("数据生成被取消")
-			return ctx.Err()
+			return nil, false, ctx.Err()
 		default:
-			// continue generation
 		}
 
-		assignment := jobAssignments[event.JobId-1]
+		event := g.allEvents[i]
+		assignment := g.jobAssignments[event.JobId-1]
 		factoryName := fmt.Sprintf("factory_%03d", assignment.FactoryId)
 		deviceName := fmt.Sprintf("device_%03d", assignment.DeviceId)
 		jobName := fmt.Sprintf("job_%06d", event.JobId)
 
 		record := g.generateSensorRecord(factoryName, jobName, deviceName, event.Time)
 		batch = append(batch, record)
-
-		if len(batch) >= batchSize {
-			select {
-			case dataChan <- batch:
-				recordsGenerated += len(batch)
-				if recordsGenerated%100000 == 0 {
-					fmt.Printf("已生成 %d/%d 条记录...\n", recordsGenerated, totalRecords)
-				}
-				batch = make([]models.SensorData, 0, batchSize) // 创建新的切片
-			case <-ctx.Done():
-				fmt.Println("数据生成在发送批次时被取消")
-				return ctx.Err()
-			}
-		}
 	}
 
-	// 发送最后一批不完整的数据
-	if len(batch) > 0 {
-		select {
-		case dataChan <- batch:
-			recordsGenerated += len(batch)
-			fmt.Printf("已生成 %d/%d 条记录 (最后一批)...\n", recordsGenerated, totalRecords)
-		case <-ctx.Done():
-			fmt.Println("数据生成在发送最后一批时被取消")
-			return ctx.Err()
-		}
-	}
+	isComplete := endOffset >= totalRecords
+	g.logf("已生成批次 %d-%d/%d 条记录\n", startOffset+1, endOffset, totalRecords)
 
-	fmt.Println("所有数据都已成功生成和发送")
-	return nil
+	return batch, isComplete, nil
 }
 
 // writeBatchToBinary 将一批数据写入二进制文件
@@ -533,7 +518,7 @@ func (g *DataGenerator) GenerateDataToFile(filename string) error {
 				}
 				recordsWritten += len(batch)
 				if recordsWritten%100000 == 0 {
-					fmt.Printf("已写入 %d/%d 条记录...当前时间点: %v\n",
+					g.logf("已写入 %d/%d 条记录...当前时间点: %v\n",
 						recordsWritten, totalRecords, time.Unix(timestamp, 0))
 				}
 				batch = batch[:0]
@@ -550,4 +535,9 @@ func (g *DataGenerator) GenerateDataToFile(filename string) error {
 	}
 
 	return nil
+}
+
+func (b *DataGenerator) logf(format string, args ...interface{}) {
+	timestamp := time.Now().Format("2006-01-02 15:04:05.000")
+	fmt.Printf("[%s] %s\n", timestamp, fmt.Sprintf(format, args...))
 }
