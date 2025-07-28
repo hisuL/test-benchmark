@@ -151,142 +151,90 @@ func (db *IoTDB) WriteBatch(ctx context.Context, data []models.SensorData) error
 	batchStart := time.Now()
 	fmt.Printf("[%s] WriteBatch 开始，数据量: %d\n", time.Now().Format("2006-01-02 15:04:05.000"), len(data))
 
+	// 确保表存在
 	session, err := db.sessionPool.GetSession()
 	if err != nil {
 		return fmt.Errorf("failed to get session: %w", err)
 	}
-	defer session.Close()
-
-	sessionTime := time.Since(batchStart)
-	fmt.Printf("[%s] 获取session耗时: %v\n", time.Now().Format("2006-01-02 15:04:05.000"), sessionTime)
-
-	// 确保表存在
-	tableStart := time.Now()
 	err = db.ensureTableExists(session)
+	session.Close()
 	if err != nil {
 		return fmt.Errorf("failed to ensure table exists: %w", err)
 	}
-	tableTime := time.Since(tableStart)
-	fmt.Printf("[%s] 确保表存在耗时: %v\n", time.Now().Format("2006-01-02 15:04:05.000"), tableTime)
 
-	// 分批处理，避免单次SQL过大
+	// 分批处理配置
 	const batchSize = 1000
-	totalBatches := (len(data) + batchSize - 1) / batchSize
-	fmt.Printf("[%s] 将分成 %d 个批次处理，每批次 %d 条记录\n", time.Now().Format("2006-01-02 15:04:05.000"), totalBatches, batchSize)
+	const workerCount = 10 // 工作线程数量，可根据IoTDB性能调整
 
-	var totalBuildTime time.Duration
-	var totalExecTime time.Duration
-
+	// 创建批次
+	var batches [][]models.SensorData
 	for i := 0; i < len(data); i += batchSize {
-		batchNum := i/batchSize + 1
-		batchStart := time.Now()
-
 		end := i + batchSize
 		if end > len(data) {
 			end = len(data)
 		}
+		batches = append(batches, data[i:end])
+	}
 
-		batch := data[i:end]
-		fmt.Printf("[%s] 开始处理第 %d/%d 批次，记录数: %d\n", time.Now().Format("2006-01-02 15:04:05.000"), batchNum, totalBatches, len(batch))
+	fmt.Printf("[%s] 将分成 %d 个批次处理，使用 %d 个工作线程\n",
+		time.Now().Format("2006-01-02 15:04:05.000"), len(batches), workerCount)
 
-		// 字符串构建开始时间
-		buildStart := time.Now()
+	// 创建通道
+	batchChan := make(chan batchJob, len(batches))
+	resultChan := make(chan batchResult, len(batches))
 
-		// 使用 strings.Builder 优化字符串构建
-		var builder strings.Builder
-		builder.Grow(len(batch)*180 + 150) // 预分配内存
+	// 启动工作线程
+	var wg sync.WaitGroup
+	for i := 0; i < workerCount; i++ {
+		wg.Add(1)
+		go db.batchWorker(ctx, i+1, batchChan, resultChan, &wg)
+	}
 
-		builder.WriteString("INSERT INTO sensor_data (factory_id, device_id, time, temperature, humidity, pressure, voltage, current, power, rpm, status, error_code, production_count, job_id) VALUES ")
+	// 发送任务
+	for i, batch := range batches {
+		batchChan <- batchJob{
+			id:   i + 1,
+			data: batch,
+		}
+	}
+	close(batchChan)
 
-		for j, record := range batch {
-			if j > 0 {
-				builder.WriteString(", ")
-			}
+	// 等待所有工作线程完成
+	go func() {
+		wg.Wait()
+		close(resultChan)
+	}()
 
-			builder.WriteByte('(')
-			builder.WriteByte('\'')
-			builder.WriteString(record.FactoryID)
-			builder.WriteString("', '")
-			builder.WriteString(record.DeviceID)
-			builder.WriteString("', ")
+	// 收集结果
+	var totalBuildTime, totalExecTime time.Duration
+	successCount := 0
+	var errors []error
 
-			// 时间戳转换
-			builder.WriteString(strconv.FormatInt(record.Timestamp.UnixMilli(), 10))
-			builder.WriteString(", ")
+	for result := range resultChan {
+		totalBuildTime += result.buildTime
+		totalExecTime += result.execTime
 
-			// float32 转换
-			builder.WriteString(strconv.FormatFloat(float64(record.Temperature), 'g', -1, 32))
-			builder.WriteString(", ")
-			builder.WriteString(strconv.FormatFloat(float64(record.Humidity), 'g', -1, 32))
-			builder.WriteString(", ")
-			builder.WriteString(strconv.FormatFloat(float64(record.Pressure), 'g', -1, 32))
-			builder.WriteString(", ")
-			builder.WriteString(strconv.FormatFloat(float64(record.Voltage), 'g', -1, 32))
-			builder.WriteString(", ")
-			builder.WriteString(strconv.FormatFloat(float64(record.Current), 'g', -1, 32))
-			builder.WriteString(", ")
-			builder.WriteString(strconv.FormatFloat(float64(record.Power), 'g', -1, 32))
-			builder.WriteString(", ")
-
-			// int64 转换
-			builder.WriteString(strconv.FormatInt(record.RPM, 10))
-			builder.WriteString(", '")
-
-			// 优化字符串转义
-			if strings.Contains(record.Status, "'") {
-				builder.WriteString(strings.ReplaceAll(record.Status, "'", "''"))
-			} else {
-				builder.WriteString(record.Status)
-			}
-
-			builder.WriteString("', ")
-
-			// int32 转换
-			builder.WriteString(strconv.FormatInt(int64(record.ErrorCode), 10))
-			builder.WriteString(", ")
-
-			// int64 转换
-			builder.WriteString(strconv.FormatInt(record.ProductionCount, 10))
-			builder.WriteString(", '")
-
-			// 优化字符串转义
-			if strings.Contains(record.JobId, "'") {
-				builder.WriteString(strings.ReplaceAll(record.JobId, "'", "''"))
-			} else {
-				builder.WriteString(record.JobId)
-			}
-
-			builder.WriteString("')")
+		if result.err != nil {
+			errors = append(errors, fmt.Errorf("batch %d failed: %w", result.batchID, result.err))
+		} else {
+			successCount++
 		}
 
-		insertSQL := builder.String()
-		buildTime := time.Since(buildStart)
-		totalBuildTime += buildTime
-
-		fmt.Printf("[%s] 第 %d 批次 SQL构建耗时: %v, SQL长度: %d 字符\n", time.Now().Format("2006-01-02 15:04:05.000"), batchNum, buildTime, len(insertSQL))
-
-		// SQL执行开始时间
-		execStart := time.Now()
-		status, err := session.ExecuteNonQueryStatement(insertSQL)
-		if err != nil {
-			return fmt.Errorf("failed to insert batch data: %w", err)
+		// 打印进度
+		if result.batchID%10 == 0 || len(errors)+successCount == len(batches) {
+			completed := len(errors) + successCount
+			fmt.Printf("[%s] === 进度统计 (%d/%d) ===\n",
+				time.Now().Format("2006-01-02 15:04:05.000"), completed, len(batches))
 		}
-		if err = checkError(status, err); err != nil {
-			return fmt.Errorf("failed to insert batch data: %w", err)
-		}
-		execTime := time.Since(execStart)
-		totalExecTime += execTime
+	}
 
-		batchTotalTime := time.Since(batchStart)
-		fmt.Printf("[%s] 第 %d 批次 SQL执行耗时: %v, 批次总耗时: %v\n", time.Now().Format("2006-01-02 15:04:05.000"), batchNum, execTime, batchTotalTime)
+	// 检查是否有错误
+	if len(errors) > 0 {
+		fmt.Printf("[%s] 批量写入完成，成功: %d, 失败: %d\n",
+			time.Now().Format("2006-01-02 15:04:05.000"), successCount, len(errors))
 
-		// 每10个批次打印一次进度统计
-		if batchNum%10 == 0 || batchNum == totalBatches {
-			avgBuildTime := totalBuildTime / time.Duration(batchNum)
-			avgExecTime := totalExecTime / time.Duration(batchNum)
-			fmt.Printf("[%s] === 进度统计 (%d/%d) === 平均构建耗时: %v, 平均执行耗时: %v\n",
-				time.Now().Format("2006-01-02 15:04:05.000"), batchNum, totalBatches, avgBuildTime, avgExecTime)
-		}
+		// 返回第一个错误，或者可以选择返回所有错误
+		return errors[0]
 	}
 
 	totalTime := time.Since(batchStart)
@@ -298,6 +246,150 @@ func (db *IoTDB) WriteBatch(ctx context.Context, data []models.SensorData) error
 		float64(totalExecTime)/float64(totalTime)*100)
 
 	return nil
+}
+
+// 批次任务结构
+type batchJob struct {
+	id   int
+	data []models.SensorData
+}
+
+// 批次结果结构
+type batchResult struct {
+	batchID   int
+	buildTime time.Duration
+	execTime  time.Duration
+	err       error
+}
+
+// 工作线程函数
+func (db *IoTDB) batchWorker(ctx context.Context, workerID int, jobs <-chan batchJob, results chan<- batchResult, wg *sync.WaitGroup) {
+	defer wg.Done()
+
+	// 为每个工作线程获取独立的session
+	session, err := db.sessionPool.GetSession()
+	if err != nil {
+		fmt.Printf("[%s] Worker %d: 获取session失败: %v\n",
+			time.Now().Format("2006-01-02 15:04:05.000"), workerID, err)
+		return
+	}
+	defer session.Close()
+
+	fmt.Printf("[%s] Worker %d: 启动\n",
+		time.Now().Format("2006-01-02 15:04:05.000"), workerID)
+
+	for job := range jobs {
+		select {
+		case <-ctx.Done():
+			results <- batchResult{
+				batchID: job.id,
+				err:     ctx.Err(),
+			}
+			return
+		default:
+		}
+
+		batchStart := time.Now()
+		fmt.Printf("[%s] Worker %d: 开始处理批次 %d，记录数: %d\n",
+			time.Now().Format("2006-01-02 15:04:05.000"), workerID, job.id, len(job.data))
+
+		// 构建SQL
+		buildStart := time.Now()
+		insertSQL := db.buildInsertSQL(job.data)
+		buildTime := time.Since(buildStart)
+
+		fmt.Printf("[%s] Worker %d: 批次 %d SQL构建耗时: %v, SQL长度: %d 字符\n",
+			time.Now().Format("2006-01-02 15:04:05.000"), workerID, job.id, buildTime, len(insertSQL))
+
+		// 执行SQL
+		execStart := time.Now()
+		status, err := session.ExecuteNonQueryStatement(insertSQL)
+		if err == nil {
+			err = checkError(status, err)
+		}
+		execTime := time.Since(execStart)
+
+		batchTotalTime := time.Since(batchStart)
+		if err != nil {
+			fmt.Printf("[%s] Worker %d: 批次 %d 执行失败: %v, 耗时: %v\n",
+				time.Now().Format("2006-01-02 15:04:05.000"), workerID, job.id, err, batchTotalTime)
+		} else {
+			fmt.Printf("[%s] Worker %d: 批次 %d 执行成功，SQL执行耗时: %v, 批次总耗时: %v\n",
+				time.Now().Format("2006-01-02 15:04:05.000"), workerID, job.id, execTime, batchTotalTime)
+		}
+
+		results <- batchResult{
+			batchID:   job.id,
+			buildTime: buildTime,
+			execTime:  execTime,
+			err:       err,
+		}
+	}
+
+	fmt.Printf("[%s] Worker %d: 完成\n",
+		time.Now().Format("2006-01-02 15:04:05.000"), workerID)
+}
+
+// 提取SQL构建逻辑为独立函数
+func (db *IoTDB) buildInsertSQL(batch []models.SensorData) string {
+	var builder strings.Builder
+	builder.Grow(len(batch)*180 + 150)
+
+	builder.WriteString("INSERT INTO sensor_data (factory_id, device_id, time, temperature, humidity, pressure, voltage, current, power, rpm, status, error_code, production_count, job_id) VALUES ")
+
+	for j, record := range batch {
+		if j > 0 {
+			builder.WriteString(", ")
+		}
+
+		builder.WriteByte('(')
+		builder.WriteByte('\'')
+		builder.WriteString(record.FactoryID)
+		builder.WriteString("', '")
+		builder.WriteString(record.DeviceID)
+		builder.WriteString("', ")
+
+		builder.WriteString(strconv.FormatInt(record.Timestamp.UnixMilli(), 10))
+		builder.WriteString(", ")
+
+		builder.WriteString(strconv.FormatFloat(float64(record.Temperature), 'g', -1, 32))
+		builder.WriteString(", ")
+		builder.WriteString(strconv.FormatFloat(float64(record.Humidity), 'g', -1, 32))
+		builder.WriteString(", ")
+		builder.WriteString(strconv.FormatFloat(float64(record.Pressure), 'g', -1, 32))
+		builder.WriteString(", ")
+		builder.WriteString(strconv.FormatFloat(float64(record.Voltage), 'g', -1, 32))
+		builder.WriteString(", ")
+		builder.WriteString(strconv.FormatFloat(float64(record.Current), 'g', -1, 32))
+		builder.WriteString(", ")
+		builder.WriteString(strconv.FormatFloat(float64(record.Power), 'g', -1, 32))
+		builder.WriteString(", ")
+
+		builder.WriteString(strconv.FormatInt(record.RPM, 10))
+		builder.WriteString(", '")
+
+		if strings.Contains(record.Status, "'") {
+			builder.WriteString(strings.ReplaceAll(record.Status, "'", "''"))
+		} else {
+			builder.WriteString(record.Status)
+		}
+
+		builder.WriteString("', ")
+		builder.WriteString(strconv.FormatInt(int64(record.ErrorCode), 10))
+		builder.WriteString(", ")
+		builder.WriteString(strconv.FormatInt(record.ProductionCount, 10))
+		builder.WriteString(", '")
+
+		if strings.Contains(record.JobId, "'") {
+			builder.WriteString(strings.ReplaceAll(record.JobId, "'", "''"))
+		} else {
+			builder.WriteString(record.JobId)
+		}
+
+		builder.WriteString("')")
+	}
+
+	return builder.String()
 }
 
 // 确保sensor_data表存在
@@ -439,25 +531,28 @@ func (db *IoTDB) QueryAggregation(ctx context.Context, jobId string, deviceID st
         WHERE time >= %d AND time <= %d AND job_id = '%s' AND  device_id = '%s'    GROUP BY  date_bin(1m, time) 
     `, aggFunc, start.UnixMilli(), end.UnixMilli(), jobId, deviceID)
 
-	fmt.Printf("SQL: %s\n", sql)
+	fmt.Println("SQL: %s\n", sql)
 	timeout := int64(60000)
 	dataSet, err := session.ExecuteQueryStatement(sql, &timeout)
+	fmt.Println("step1")
 	if err != nil {
 		return 0, err
 	}
 	defer dataSet.Close()
+	fmt.Println("step2")
 
 	hasNext, err := dataSet.Next()
 	if err != nil || !hasNext {
 		return 0, fmt.Errorf("no aggregation result found")
 	}
-
-	aggValue, err := dataSet.GetFloat("agg_value")
+	fmt.Println("step3")
+	aggValue, err := dataSet.GetDouble("agg_value")
 	if err != nil {
 		return 0, err
 	}
+	fmt.Println("step4")
 
-	fmt.Printf("QueryAggregation result: %f\n", aggValue)
+	fmt.Println("QueryAggregation result: %f\n", aggValue)
 	return float32(aggValue), nil
 }
 

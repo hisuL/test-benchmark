@@ -288,6 +288,7 @@ func (b *Benchmark) RunQueryBenchmark(ctx context.Context) ([]models.QueryResult
 	var allResults []models.QueryResult
 
 	queryTypes := []string{"point_query", "aggregation", "range_query", "group_by"}
+	//queryTypes := []string{"aggregation"}
 
 	for _, db := range b.databases {
 		b.logf("Testing query performance for %s", db.Name())
@@ -432,7 +433,7 @@ func (b *Benchmark) executeQuery(ctx context.Context, db database.Database, quer
 	randomId := b.rand.Intn(allJobIndex) + 1
 	jobId := fmt.Sprintf("job_%06d", randomId)
 	factoryId, deviceId := generator.GetDeviceByJobId(randomId, b.factoryCount, b.deviceCount)
-	b.logf("Executing query for jobId: %s, factoryId: %s, deviceId: %s", jobId, factoryId, deviceId)
+	b.logf("Executing query for jobId: %v, factoryId: %v, deviceId: %v, queryType: %v", jobId, factoryId, deviceId, queryType)
 	deviceIdStr := fmt.Sprintf("device_%03d", deviceId)
 	switch queryType {
 	case "point_query":
@@ -446,7 +447,6 @@ func (b *Benchmark) executeQuery(ctx context.Context, db database.Database, quer
 
 	case "group_by":
 		_, err = db.QueryGroupBy(ctx, jobId, start, end, "device_id", 1*time.Hour)
-
 	default:
 		err = fmt.Errorf("unknown query type: %s", queryType)
 	}
