@@ -26,9 +26,6 @@ type DataGenerator struct {
 // 添加批次大小常量
 const batchSize = 10000
 
-// 添加用于二进制写入的常量
-const dataFileVersion = uint32(1)
-
 func NewDataGenerator(cfg *config.DataGenConfig) *DataGenerator {
 	return &DataGenerator{
 		config: cfg,

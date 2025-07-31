@@ -50,7 +50,7 @@ func (b *Benchmark) AddDatabase(db database.Database) {
 	b.databases = append(b.databases, db)
 }
 
-// processBatchesFromChannel 从 channel 中读取数据批次并写入数据库
+// 从 channel 中读取数据批次并写入数据库
 func (b *Benchmark) processBatchesFromChannel(ctx context.Context, db database.Database, dataChan <-chan []models.SensorData) (models.WriteResult, error) {
 	var totalRecords int64
 	var totalDuration time.Duration

@@ -1,7 +1,7 @@
 data_generation:
   device_count: 200
   factory_count: 10
-  job_count: 20000000
+  job_count: 80000000
   output_file: "generated_data.json"
   day: "2025-06-30"
   time_interval: 30
@@ -30,7 +30,7 @@ databases:
 
 benchmark:
   ## concurrency_levels: [1, 5, 20, 50, 100]
-  concurrency_levels: [10]
+  concurrency_levels: [20]
   query_duration_seconds: 60
   warmup_duration_seconds: 10
   report_interval:

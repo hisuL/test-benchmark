@@ -3,6 +3,7 @@ package database
 import (
 	"context"
 	"fmt"
+	"sync"
 	"time"
 
 	influxdb2 "github.com/influxdata/influxdb-client-go/v2"
@@ -67,28 +68,82 @@ func (db *InfluxDB) DropSchema(ctx context.Context) error {
 	return err
 }
 
-func (db *InfluxDB) WriteBatch(ctx context.Context, data []models.SensorData) error {
-	for _, record := range data {
-		p := influxdb2.NewPointWithMeasurement("sensor_data").
-			AddTag("factory_id", record.FactoryID).
-			AddTag("device_id", record.DeviceID).
-			AddField("status", record.Status).
-			AddTag("job_id", record.JobId).
-			AddField("temperature", record.Temperature).
-			AddField("humidity", record.Humidity).
-			AddField("pressure", record.Pressure).
-			AddField("voltage", record.Voltage).
-			AddField("current", record.Current).
-			AddField("power", record.Power).
-			AddField("rpm", record.RPM).
-			AddField("error_code", record.ErrorCode).
-			AddField("production_count", record.ProductionCount).
-			SetTime(record.Timestamp)
+/*
+	func (db *InfluxDB) WriteBatch(ctx context.Context, data []models.SensorData) error {
+		for _, record := range data {
+			p := influxdb2.NewPointWithMeasurement("sensor_data").
+				AddTag("factory_id", record.FactoryID).
+				AddTag("device_id", record.DeviceID).
+				AddField("status", record.Status).
+				AddTag("job_id", record.JobId).
+				AddField("temperature", record.Temperature).
+				AddField("humidity", record.Humidity).
+				AddField("pressure", record.Pressure).
+				AddField("voltage", record.Voltage).
+				AddField("current", record.Current).
+				AddField("power", record.Power).
+				AddField("rpm", record.RPM).
+				AddField("error_code", record.ErrorCode).
+				AddField("production_count", record.ProductionCount).
+				SetTime(record.Timestamp)
 
-		db.writeAPI.WritePoint(p)
+			db.writeAPI.WritePoint(p)
+		}
+
+		db.writeAPI.Flush()
+		return nil
+	}
+*/
+func (db *InfluxDB) WriteBatch(ctx context.Context, data []models.SensorData) error {
+	const batchSize = 300
+	const workerCount = 20 // 设定同时运行的 worker 数量
+
+	// 创建一个任务通道
+	tasks := make(chan []models.SensorData)
+	var wg sync.WaitGroup
+
+	// 启动 worker goroutines
+	for w := 0; w < workerCount; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for batch := range tasks {
+				for _, record := range batch {
+					p := influxdb2.NewPointWithMeasurement("sensor_data").
+						AddTag("factory_id", record.FactoryID).
+						AddTag("device_id", record.DeviceID).
+						AddField("status", record.Status).
+						AddTag("job_id", record.JobId).
+						AddField("temperature", record.Temperature).
+						AddField("humidity", record.Humidity).
+						AddField("pressure", record.Pressure).
+						AddField("voltage", record.Voltage).
+						AddField("current", record.Current).
+						AddField("power", record.Power).
+						AddField("rpm", record.RPM).
+						AddField("error_code", record.ErrorCode).
+						AddField("production_count", record.ProductionCount).
+						SetTime(record.Timestamp)
+
+					db.writeAPI.WritePoint(p)
+				}
+			}
+		}()
 	}
 
-	db.writeAPI.Flush()
+	// 将数据分批并发送到任务通道
+	for i := 0; i < len(data); i += batchSize {
+		end := i + batchSize
+		if end > len(data) {
+			end = len(data)
+		}
+		tasks <- data[i:end] // 发送批次到通道
+	}
+
+	close(tasks) // 关闭任务通道，表示没有更多任务
+	wg.Wait()    // 等待所有 goroutines 完成
+
+	db.writeAPI.Flush() // 确保所有数据都被写入
 	return nil
 }
 
