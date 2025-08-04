@@ -17,10 +17,14 @@ import (
 )
 
 type DataGenerator struct {
-	config         *config.DataGenConfig
-	rand           *rand.Rand
-	allEvents      []DataCollectionEvent // 添加这个字段
-	jobAssignments []JobAssignment       // 添加这个字段
+	config *config.DataGenConfig
+	rand   *rand.Rand
+	// 移除 allEvents 字段，改为存储元数据
+	totalRecords   int             // 总记录数
+	jobStartTimes  []time.Time     // Job启动时间
+	jobAssignments []JobAssignment // Job分配信息
+	recordsPerJob  int             // 每个Job的记录数
+	dayStart       time.Time       // 一天的开始时间
 }
 
 // 添加批次大小常量
@@ -33,29 +37,48 @@ func NewDataGenerator(cfg *config.DataGenConfig) *DataGenerator {
 	}
 }
 
-// JobSchedule 表示Job的调度信息
-type JobSchedule struct {
-	JobId     int
-	StartTime time.Time
-	EndTime   time.Time
-}
-
-func (g *DataGenerator) GenerateData() ([]models.SensorData, error) {
-	// 1. 解析日期并设置起始时间
-	dayStart, err := ParseDay(g.config.Day)
-	if err != nil {
-		return nil, fmt.Errorf("解析日期失败: %v", err)
+// 初始化元数据（只计算，不存储所有事件）
+func (g *DataGenerator) initializeMetadata() error {
+	if g.totalRecords > 0 {
+		return nil // 已经初始化过了
 	}
 
-	// 2. 创建所有的数据采集事件
-	events := g.createDataCollectionEvents(dayStart)
+	// 解析日期
+	dayStart, err := ParseDay(g.config.Day)
+	if err != nil {
+		return fmt.Errorf("解析日期失败: %v", err)
+	}
+	g.dayStart = dayStart
 
-	// 3. 事件已经按时间排序，直接按顺序生成数据
+	// 计算基础参数
+	g.recordsPerJob = g.calculateRecordsPerJob()
+	g.totalRecords = g.config.JobCount * g.recordsPerJob
+	g.jobStartTimes = g.calculateJobStartTimes(dayStart)
+	g.jobAssignments = g.assignJobsToDevices()
+
+	g.logf("总共将生成 %d 条记录 (JobCount: %d, RecordsPerJob: %d)\n",
+		g.totalRecords, g.config.JobCount, g.recordsPerJob)
+
+	return nil
+}
+
+// 原有的 GenerateData 方法保持不变（用于小数据量）
+func (g *DataGenerator) GenerateData() ([]models.SensorData, error) {
+	// 对于小数据量，仍然可以一次性生成
+	if err := g.initializeMetadata(); err != nil {
+		return nil, err
+	}
+
+	// 如果数据量太大，建议使用批次方法
+	if g.totalRecords > 20000000 { // 超过100万条记录建议使用批次方法
+		return nil, fmt.Errorf("数据量过大 (%d 条记录)，建议使用 GenerateDataBatch 方法", g.totalRecords)
+	}
+
+	events := g.generateBatchEvents(0, g.totalRecords)
 	data := make([]models.SensorData, 0, len(events))
-	jobAssignments := g.assignJobsToDevices()
 
 	for _, event := range events {
-		assignment := jobAssignments[event.JobId-1]
+		assignment := g.jobAssignments[event.JobId-1]
 		factoryName := fmt.Sprintf("factory_%03d", assignment.FactoryId)
 		deviceName := fmt.Sprintf("device_%03d", assignment.DeviceId)
 		jobName := fmt.Sprintf("job_%06d", event.JobId)
@@ -67,41 +90,17 @@ func (g *DataGenerator) GenerateData() ([]models.SensorData, error) {
 	return data, nil
 }
 
+// JobSchedule 表示Job的调度信息
+type JobSchedule struct {
+	JobId     int
+	StartTime time.Time
+	EndTime   time.Time
+}
+
 // DataCollectionEvent 表示一个数据采集事件
 type DataCollectionEvent struct {
 	Time  time.Time
 	JobId int
-}
-
-// createDataCollectionEvents 创建所有数据采集事件并按时间排序
-func (g *DataGenerator) createDataCollectionEvents(dayStart time.Time) []DataCollectionEvent {
-	var events []DataCollectionEvent
-
-	// 计算Job启动时间
-	jobStartTimes := g.calculateJobStartTimes(dayStart)
-	recordsPerJob := g.calculateRecordsPerJob()
-	timeInterval := time.Duration(g.config.TimeInterval) * time.Second
-
-	// 为每个Job创建数据采集事件
-	for jobId := 1; jobId <= g.config.JobCount; jobId++ {
-		jobStartTime := jobStartTimes[jobId-1]
-
-		// 为该job的每个采集时间点创建事件
-		for i := 0; i < recordsPerJob; i++ {
-			eventTime := jobStartTime.Add(time.Duration(i) * timeInterval)
-			events = append(events, DataCollectionEvent{
-				Time:  eventTime,
-				JobId: jobId,
-			})
-		}
-	}
-
-	// 按时间排序事件
-	sort.Slice(events, func(i, j int) bool {
-		return events[i].Time.Before(events[j].Time)
-	})
-
-	return events
 }
 
 type JobAssignment struct {
@@ -310,43 +309,35 @@ func (g *DataGenerator) generateErrorCode(status string) int32 {
 	return 0 // No error
 }
 
-// 在 generator 包中添加新的方法
+// GenerateDataBatch 按需生成批次数据，不预存所有事件
 func (g *DataGenerator) GenerateDataBatch(ctx context.Context, startOffset, batchSize int) ([]models.SensorData, bool, error) {
-	// 1. 解析日期并设置起始时间
-	dayStart, err := ParseDay(g.config.Day)
-	if err != nil {
-		return nil, false, fmt.Errorf("解析日期失败: %v", err)
-	}
-
-	// 2. 创建所有的数据采集事件（如果还没有创建的话）
-	if g.allEvents == nil {
-		g.allEvents = g.createDataCollectionEvents(dayStart)
-		g.jobAssignments = g.assignJobsToDevices()
-		g.logf("总共将生成 %d 条记录\n", len(g.allEvents))
-	}
-
-	totalRecords := len(g.allEvents)
-	endOffset := startOffset + batchSize
-	if endOffset > totalRecords {
-		endOffset = totalRecords
+	// 初始化元数据
+	if err := g.initializeMetadata(); err != nil {
+		return nil, false, err
 	}
 
 	// 检查是否已经处理完所有数据
-	if startOffset >= totalRecords {
+	if startOffset >= g.totalRecords {
 		return nil, true, nil // 返回 true 表示已完成
 	}
 
-	// 3. 生成当前批次的数据
-	batch := make([]models.SensorData, 0, endOffset-startOffset)
+	endOffset := startOffset + batchSize
+	if endOffset > g.totalRecords {
+		endOffset = g.totalRecords
+	}
 
-	for i := startOffset; i < endOffset; i++ {
+	// 按需生成当前批次的事件
+	batchEvents := g.generateBatchEvents(startOffset, endOffset)
+
+	// 生成传感器数据
+	batch := make([]models.SensorData, 0, len(batchEvents))
+	for _, event := range batchEvents {
 		select {
 		case <-ctx.Done():
 			return nil, false, ctx.Err()
 		default:
 		}
 
-		event := g.allEvents[i]
 		assignment := g.jobAssignments[event.JobId-1]
 		factoryName := fmt.Sprintf("factory_%03d", assignment.FactoryId)
 		deviceName := fmt.Sprintf("device_%03d", assignment.DeviceId)
@@ -356,10 +347,125 @@ func (g *DataGenerator) GenerateDataBatch(ctx context.Context, startOffset, batc
 		batch = append(batch, record)
 	}
 
-	isComplete := endOffset >= totalRecords
-	g.logf("已生成批次 %d-%d/%d 条记录\n", startOffset+1, endOffset, totalRecords)
+	isComplete := endOffset >= g.totalRecords
+	g.logf("已生成批次 %d-%d/%d 条记录\n", startOffset+1, endOffset, g.totalRecords)
 
 	return batch, isComplete, nil
+}
+
+// generateBatchEvents 按需生成指定范围的事件（按时间排序）
+func (g *DataGenerator) generateBatchEvents(startOffset, endOffset int) []DataCollectionEvent {
+	if endOffset > g.totalRecords {
+		endOffset = g.totalRecords
+	}
+
+	batchSize := endOffset - startOffset
+	events := make([]DataCollectionEvent, 0, batchSize)
+	timeInterval := time.Duration(g.config.TimeInterval) * time.Second
+
+	// 计算全局索引对应的事件
+	for globalIndex := startOffset; globalIndex < endOffset; globalIndex++ {
+		// 通过全局索引计算对应的JobId和该Job内的记录索引
+		jobIndex := globalIndex / g.recordsPerJob    // 哪个Job
+		recordIndex := globalIndex % g.recordsPerJob // Job内第几条记录
+
+		jobId := jobIndex + 1
+		jobStartTime := g.jobStartTimes[jobIndex]
+		eventTime := jobStartTime.Add(time.Duration(recordIndex) * timeInterval)
+
+		events = append(events, DataCollectionEvent{
+			Time:  eventTime,
+			JobId: jobId,
+		})
+	}
+
+	// 对当前批次按时间排序
+	sort.Slice(events, func(i, j int) bool {
+		return events[i].Time.Before(events[j].Time)
+	})
+
+	return events
+}
+
+// 如果需要严格的全局时序，可以使用这个方法
+func (g *DataGenerator) GenerateDataBatchWithGlobalOrder(ctx context.Context, startOffset, batchSize int) ([]models.SensorData, bool, error) {
+	// 初始化元数据
+	if err := g.initializeMetadata(); err != nil {
+		return nil, false, err
+	}
+
+	// 检查是否已经处理完所有数据
+	if startOffset >= g.totalRecords {
+		return nil, true, nil
+	}
+
+	endOffset := startOffset + batchSize
+	if endOffset > g.totalRecords {
+		endOffset = g.totalRecords
+	}
+
+	// 生成全局排序的批次数据
+	batch := g.generateGlobalOrderedBatch(ctx, startOffset, endOffset)
+
+	isComplete := endOffset >= g.totalRecords
+	g.logf("已生成全局排序批次 %d-%d/%d 条记录\n", startOffset+1, endOffset, g.totalRecords)
+
+	return batch, isComplete, nil
+}
+
+// generateGlobalOrderedBatch 生成全局时间排序的批次
+func (g *DataGenerator) generateGlobalOrderedBatch(ctx context.Context, startOffset, endOffset int) []models.SensorData {
+	timeInterval := time.Duration(g.config.TimeInterval) * time.Second
+
+	// 生成所有可能的时间点映射 (时间戳 -> 该时间点的所有事件)
+	timeEventMap := make(map[int64][]DataCollectionEvent)
+
+	// 只生成当前批次范围内的事件
+	for globalIndex := startOffset; globalIndex < endOffset; globalIndex++ {
+		jobIndex := globalIndex / g.recordsPerJob
+		recordIndex := globalIndex % g.recordsPerJob
+
+		jobId := jobIndex + 1
+		jobStartTime := g.jobStartTimes[jobIndex]
+		eventTime := jobStartTime.Add(time.Duration(recordIndex) * timeInterval)
+
+		timestamp := eventTime.Unix()
+		timeEventMap[timestamp] = append(timeEventMap[timestamp], DataCollectionEvent{
+			Time:  eventTime,
+			JobId: jobId,
+		})
+	}
+
+	// 按时间戳排序
+	timestamps := make([]int64, 0, len(timeEventMap))
+	for ts := range timeEventMap {
+		timestamps = append(timestamps, ts)
+	}
+	sort.Slice(timestamps, func(i, j int) bool {
+		return timestamps[i] < timestamps[j]
+	})
+
+	// 按时间顺序生成数据
+	batch := make([]models.SensorData, 0, endOffset-startOffset)
+	for _, timestamp := range timestamps {
+		for _, event := range timeEventMap[timestamp] {
+			select {
+			case <-ctx.Done():
+				return batch
+			default:
+			}
+
+			assignment := g.jobAssignments[event.JobId-1]
+			factoryName := fmt.Sprintf("factory_%03d", assignment.FactoryId)
+			deviceName := fmt.Sprintf("device_%03d", assignment.DeviceId)
+			jobName := fmt.Sprintf("job_%06d", event.JobId)
+
+			record := g.generateSensorRecord(factoryName, jobName, deviceName, event.Time)
+			batch = append(batch, record)
+		}
+	}
+
+	return batch
 }
 
 // writeBatchToBinary 将一批数据写入二进制文件
@@ -426,35 +532,13 @@ func writeBatchToBinary(writer *bufio.Writer, batch []models.SensorData) error {
 	return nil
 }
 
-// GenerateDataToFile 生成数据并直接写入CSV文件，保证全局时序
+// GenerateDataToFile 生成数据并直接写入CSV文件，使用流式处理
 func (g *DataGenerator) GenerateDataToFile(filename string) error {
-	// 1. 解析日期并设置起始时间
-	dayStart, err := ParseDay(g.config.Day)
-	if err != nil {
-		return fmt.Errorf("解析日期失败: %v", err)
+	// 初始化元数据
+	if err := g.initializeMetadata(); err != nil {
+		return err
 	}
 
-	// 2. 创建所有的数据采集事件（已按时间排序）
-	events := g.createDataCollectionEvents(dayStart)
-	totalRecords := len(events)
-
-	// 按时间分片，每个时间点的数据放在一起
-	timeSlices := make(map[int64][]DataCollectionEvent)
-	for _, event := range events {
-		timestamp := event.Time.Unix()
-		timeSlices[timestamp] = append(timeSlices[timestamp], event)
-	}
-
-	// 获取所有时间点并排序
-	timePoints := make([]int64, 0, len(timeSlices))
-	for ts := range timeSlices {
-		timePoints = append(timePoints, ts)
-	}
-	sort.Slice(timePoints, func(i, j int) bool {
-		return timePoints[i] < timePoints[j]
-	})
-
-	// 创建或截断文件
 	file, err := os.Create(filename)
 	if err != nil {
 		return fmt.Errorf("创建文件失败: %v", err)
@@ -475,22 +559,22 @@ func (g *DataGenerator) GenerateDataToFile(filename string) error {
 		return fmt.Errorf("写入表头失败: %v", err)
 	}
 
-	// 3. 按时间点顺序生成和写入数据
-	jobAssignments := g.assignJobsToDevices()
+	// 流式处理数据
 	recordsWritten := 0
-	batch := make([][]string, 0, batchSize)
+	batchCSV := make([][]string, 0, batchSize)
 
-	for _, timestamp := range timePoints {
-		// 处理同一时间点的所有事件
-		for _, event := range timeSlices[timestamp] {
-			assignment := jobAssignments[event.JobId-1]
-			factoryName := fmt.Sprintf("factory_%03d", assignment.FactoryId)
-			deviceName := fmt.Sprintf("device_%03d", assignment.DeviceId)
-			jobName := fmt.Sprintf("job_%06d", event.JobId)
+	for offset := 0; offset < g.totalRecords; offset += batchSize {
+		// 使用批次方法生成数据
+		batch, _, err := g.GenerateDataBatchWithGlobalOrder(context.Background(), offset, batchSize)
+		if err != nil {
+			return fmt.Errorf("生成数据批次失败: %v", err)
+		}
 
-			record := g.generateSensorRecord(factoryName, jobName, deviceName, event.Time)
-			// 转换为CSV行
+		// 转换为CSV格式
+		for _, record := range batch {
 			csvRecord := []string{
+				strconv.FormatInt(record.Timestamp.Unix(), 10),
+				record.FactoryID,
 				strconv.FormatInt(record.Timestamp.Unix(), 10),
 				record.FactoryID,
 				record.JobId,
@@ -506,35 +590,37 @@ func (g *DataGenerator) GenerateDataToFile(filename string) error {
 				strconv.FormatInt(int64(record.ErrorCode), 10),
 				strconv.FormatInt(record.ProductionCount, 10),
 			}
-			batch = append(batch, csvRecord)
-
-			// 当批次满了就写入文件
-			if len(batch) >= batchSize {
-				if err := writer.WriteAll(batch); err != nil {
-					return fmt.Errorf("写入批次数据失败: %v", err)
-				}
-				recordsWritten += len(batch)
-				if recordsWritten%100000 == 0 {
-					g.logf("已写入 %d/%d 条记录...当前时间点: %v\n",
-						recordsWritten, totalRecords, time.Unix(timestamp, 0))
-				}
-				batch = batch[:0]
-				writer.Flush() // 确保数据写入磁盘
-			}
+			batchCSV = append(batchCSV, csvRecord)
 		}
+
+		// 批量写入文件
+		if err := writer.WriteAll(batchCSV); err != nil {
+			return fmt.Errorf("写入批次数据失败: %v", err)
+		}
+
+		recordsWritten += len(batch)
+		if recordsWritten%100000 == 0 {
+			g.logf("已写入 %d/%d 条记录...\n", recordsWritten, g.totalRecords)
+		}
+
+		// 清理批次数据，释放内存
+		batchCSV = batchCSV[:0]
+		writer.Flush()
 	}
 
-	// 写入剩余的数据
-	if len(batch) > 0 {
-		if err := writer.WriteAll(batch); err != nil {
-			return fmt.Errorf("写入剩余数据失败: %v", err)
-		}
-	}
-
+	g.logf("数据生成完成，共写入 %d 条记录\n", recordsWritten)
 	return nil
 }
 
-func (b *DataGenerator) logf(format string, args ...interface{}) {
+// GetTotalRecords 获取总记录数（用于外部进度跟踪）
+func (g *DataGenerator) GetTotalRecords() (int, error) {
+	if err := g.initializeMetadata(); err != nil {
+		return 0, err
+	}
+	return g.totalRecords, nil
+}
+
+func (g *DataGenerator) logf(format string, args ...interface{}) {
 	timestamp := time.Now().Format("2006-01-02 15:04:05.000")
-	fmt.Printf("[%s] %s\n", timestamp, fmt.Sprintf(format, args...))
+	fmt.Printf("[%s] %s", timestamp, fmt.Sprintf(format, args...))
 }

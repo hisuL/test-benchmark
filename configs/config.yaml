@@ -1,7 +1,7 @@
 data_generation:
   device_count: 200
   factory_count: 10
-  job_count: 80000000
+  job_count: 2000000
   output_file: "generated_data.json"
   day: "2025-06-30"
   time_interval: 30

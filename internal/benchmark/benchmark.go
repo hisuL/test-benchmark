@@ -245,7 +245,7 @@ func (b *Benchmark) RunWriteBenchmark(ctx context.Context) ([]models.WriteResult
 	b.logf("Starting write benchmark...")
 
 	var results []models.WriteResult
-	const writeBatchSize = 20000000 // 2000万条记录
+	const writeBatchSize = 1000000 // 2000万条记录
 
 	for _, db := range b.databases {
 		b.logf("Testing write performance for %s", db.Name())

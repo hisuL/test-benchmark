@@ -58,20 +58,20 @@ func (db *InfluxDB) CreateSchema(ctx context.Context) error {
 
 func (db *InfluxDB) DropSchema(ctx context.Context) error {
 	// Delete all data from bucket
-	query := fmt.Sprintf(`
-        from(bucket: "%s")
-        |> range(start: 1970-01-01T00:00:00Z)
-        |> drop()
-    `, db.bucket)
+	/*	query := fmt.Sprintf(`
+		    from(bucket: "%s")
+		    |> range(start: 1970-01-01T00:00:00Z)
+		    |> drop()
+		`, db.bucket)
 
-	_, err := db.queryAPI.Query(ctx, query)
-	return err
+			_, err := db.queryAPI.Query(ctx, query)*/
+	return nil
 }
 
 /*
 	func (db *InfluxDB) WriteBatch(ctx context.Context, data []models.SensorData) error {
 		for _, record := range data {
-			p := influxdb2.NewPointWithMeasurement("sensor_data").
+			p := influxdb2.NewPointWithMeasurement("sensor_data2").
 				AddTag("factory_id", record.FactoryID).
 				AddTag("device_id", record.DeviceID).
 				AddField("status", record.Status).
@@ -96,7 +96,7 @@ func (db *InfluxDB) DropSchema(ctx context.Context) error {
 */
 func (db *InfluxDB) WriteBatch(ctx context.Context, data []models.SensorData) error {
 	const batchSize = 300
-	const workerCount = 20 // 设定同时运行的 worker 数量
+	const workerCount = 10 // 设定同时运行的 worker 数量
 
 	// 创建一个任务通道
 	tasks := make(chan []models.SensorData)
@@ -109,7 +109,7 @@ func (db *InfluxDB) WriteBatch(ctx context.Context, data []models.SensorData) er
 			defer wg.Done()
 			for batch := range tasks {
 				for _, record := range batch {
-					p := influxdb2.NewPointWithMeasurement("sensor_data").
+					p := influxdb2.NewPointWithMeasurement("sensor_data2").
 						AddTag("factory_id", record.FactoryID).
 						AddTag("device_id", record.DeviceID).
 						AddField("status", record.Status).
@@ -151,14 +151,14 @@ func (db *InfluxDB) QueryByDeviceAndTimeRange(ctx context.Context, jobId string,
 	queryStr := fmt.Sprintf(`
         from(bucket: "%s")
         |> range(start: %s, stop: %s)
-        |> filter(fn: (r) => r._measurement == "sensor_data")
+        |> filter(fn: (r) => r._measurement == "sensor_data2")
 		|> filter(fn: (r) => r["_field"] == "temperature")
         |> filter(fn: (r) => r.device_id == "%s")
 		|> filter(fn: (r) => r.job_id == "%s")
 		|> aggregateWindow(every: 1m, fn: mean, createEmpty: false)
 		|> yield(name: "mean")
     `, db.bucket, start.Format(time.RFC3339), end.Format(time.RFC3339), deviceID, jobId)
-	//fmt.Printf(queryStr)
+	fmt.Printf(queryStr)
 
 	result, err := db.queryAPI.Query(ctx, queryStr)
 	if err != nil {
@@ -199,7 +199,7 @@ func (db *InfluxDB) QueryAggregation(ctx context.Context, jobId string, deviceID
 	queryStr := fmt.Sprintf(`
         from(bucket: "%s")
         |> range(start: %s, stop: %s)
-        |> filter(fn: (r) => r._measurement == "sensor_data")
+        |> filter(fn: (r) => r._measurement == "sensor_data2")
         |> filter(fn: (r) => r.job_id == "%s")
         |> filter(fn: (r) => r.device_id == "%s")
         |> filter(fn: (r) => r._field == "temperature")
@@ -228,7 +228,7 @@ func (db *InfluxDB) QueryTimeRange(ctx context.Context, jobId string, start, end
 	queryStr := fmt.Sprintf(`
         from(bucket: "%s")
         |> range(start: %s, stop: %s)
-        |> filter(fn: (r) => r._measurement == "sensor_data")
+        |> filter(fn: (r) => r._measurement == "sensor_data2")
         |> filter(fn: (r) => r.job_id == "%s")
         |> filter(fn: (r) => r._field == "temperature")
         |> aggregateWindow(every: 1m, fn: mean, createEmpty: false)
@@ -263,7 +263,7 @@ func (db *InfluxDB) QueryTimeRange(ctx context.Context, jobId string, start, end
 func (db *InfluxDB) QueryGroupBy(ctx context.Context, jobId string, start, end time.Time, groupBy string, interval time.Duration) (map[string]float32, error) {
 	var groupByClause string
 	switch groupBy {
-	case "device":
+	case "device_id":
 		groupByClause = `|> group(columns: ["device_id"])`
 	case "factory":
 		groupByClause = `|> group(columns: ["factory_id"])`
@@ -274,11 +274,11 @@ func (db *InfluxDB) QueryGroupBy(ctx context.Context, jobId string, start, end t
 	queryStr := fmt.Sprintf(`
         from(bucket: "%s")
         |> range(start: %s, stop: %s)
-        |> filter(fn: (r) => r._measurement == "sensor_data")
+        |> filter(fn: (r) => r._measurement == "sensor_data2")
         |> filter(fn: (r) => r._field == "temperature")
 		|> filter(fn: (r) => r.job_id == "%s")
-        %s
-        |> mean()
+	    %s
+  		|> aggregateWindow(every: 1m, fn: mean, createEmpty: false)
     `, db.bucket, start.Format(time.RFC3339), end.Format(time.RFC3339), jobId, groupByClause)
 	fmt.Printf(queryStr)
 	result, err := db.queryAPI.Query(ctx, queryStr)
